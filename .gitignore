@@ -1,0 +1,29 @@
+# Cloned upstream trees (track separately or use submodules)
+/verilator/
+/ibex-demo-system/
+/qemu/
+
+# Local bootstrap / artifacts
+/local/
+/toolchain/
+/deps/
+*.tar.xz
+*.tar.gz
+
+# Builds
+**/build/
+**/*.o
+**/*.a
+**/obj_*/
+**/sim-verilator/
+
+# Sim outputs
+**/uart0.log
+**/sim.fst
+**/ibex_demo_system.log
+*.vcd
+
+# Editor / OS
+.DS_Store
+*.swp
+.venv/

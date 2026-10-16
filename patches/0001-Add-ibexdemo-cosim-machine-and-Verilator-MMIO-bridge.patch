@@ -1,0 +1,632 @@
+From ff443ccad9ece82ce005ea01a7a6a0d16ce966e8 Mon Sep 17 00:00:00 2001
+From: Rosh2403 <110334858+Rosh2403@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 14:03:48 -0700
+Subject: [PATCH] Add ibexdemo-cosim machine and Verilator MMIO bridge
+
+Forward GPIO at 0x80000000 to a Unix socket server, add 128KiB RAM for demo
+ELF compatibility, and relax mkvenv when pip is available without ensurepip.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ hw/ibexdemo/Kconfig                         |   3 +
+ hw/ibexdemo/ibexdemo_cosim_bridge.c         | 218 +++++++++++++++++++
+ hw/ibexdemo/meson.build                     |   1 +
+ hw/riscv/Kconfig                            |   1 +
+ hw/riscv/ibexdemo.c                         | 220 ++++++++++++++++++--
+ include/hw/ibexdemo/ibexdemo_cosim_bridge.h |  26 +++
+ include/hw/riscv/ibexdemo.h                 |   6 +
+ python/scripts/mkvenv.py                    |   9 +-
+ 8 files changed, 462 insertions(+), 22 deletions(-)
+ create mode 100644 hw/ibexdemo/ibexdemo_cosim_bridge.c
+ create mode 100644 include/hw/ibexdemo/ibexdemo_cosim_bridge.h
+
+diff --git a/hw/ibexdemo/Kconfig b/hw/ibexdemo/Kconfig
+index 1258329..26eaec0 100644
+--- a/hw/ibexdemo/Kconfig
++++ b/hw/ibexdemo/Kconfig
+@@ -15,3 +15,6 @@ config IBEXDEMO_TIMER
+ 
+ config IBEXDEMO_UART
+     bool
++
++config IBEXDEMO_COSIM_BRIDGE
++    bool
+diff --git a/hw/ibexdemo/ibexdemo_cosim_bridge.c b/hw/ibexdemo/ibexdemo_cosim_bridge.c
+new file mode 100644
+index 0000000..1e90a7f
+--- /dev/null
++++ b/hw/ibexdemo/ibexdemo_cosim_bridge.c
+@@ -0,0 +1,218 @@
++/*
++ * QEMU Ibex Demo cosim MMIO bridge (forwards to Verilator socket server)
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/module.h"
++#include "qapi/error.h"
++#include "hw/ibexdemo/ibexdemo_cosim_bridge.h"
++#include "hw/qdev-properties.h"
++#include "hw/qdev-properties-system.h"
++#include "hw/sysbus.h"
++#include "trace.h"
++
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++#define COSIM_REQ_MAGIC  0x49425843u
++#define COSIM_RESP_MAGIC 0x49425852u
++
++struct CosimMmioReq {
++    uint32_t magic;
++    uint32_t addr;
++    uint8_t we;
++    uint8_t be;
++    uint8_t reserved[2];
++    uint32_t wdata;
++};
++
++struct CosimMmioResp {
++    uint32_t magic;
++    uint32_t rdata;
++};
++
++static bool cosim_bridge_connect(IbexDemoCosimBridgeState *s, Error **errp)
++{
++    if (s->sock_fd >= 0) {
++        return true;
++    }
++
++    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
++    if (fd < 0) {
++        error_setg_errno(errp, errno, "cosim bridge: socket()");
++        return false;
++    }
++
++    struct sockaddr_un addr = { .sun_family = AF_UNIX };
++    if (g_strlcpy(addr.sun_path, s->socket_path, sizeof(addr.sun_path))
++        >= sizeof(addr.sun_path)) {
++        error_setg(errp, "cosim bridge: socket path too long");
++        close(fd);
++        return false;
++    }
++
++    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
++        error_setg_errno(errp, errno, "cosim bridge: connect(%s)",
++                         s->socket_path);
++        close(fd);
++        return false;
++    }
++
++    s->sock_fd = fd;
++    return true;
++}
++
++static void cosim_bridge_disconnect(IbexDemoCosimBridgeState *s)
++{
++    if (s->sock_fd >= 0) {
++        close(s->sock_fd);
++        s->sock_fd = -1;
++    }
++}
++
++static uint32_t cosim_bridge_mmio(IbexDemoCosimBridgeState *s, hwaddr offset,
++                                  bool is_write, uint32_t val, unsigned size,
++                                  Error **errp)
++{
++    if (!cosim_bridge_connect(s, errp)) {
++        return 0;
++    }
++
++    uint8_t be = 0;
++    switch (size) {
++    case 1:
++        be = (1u << (offset & 3));
++        break;
++    case 2:
++        be = (3u << (offset & 2));
++        break;
++    case 4:
++        be = 0xFu;
++        break;
++    default:
++        error_setg(errp, "cosim bridge: unsupported access size %u", size);
++        cosim_bridge_disconnect(s);
++        return 0;
++    }
++
++    struct CosimMmioReq req = {
++        .magic = COSIM_REQ_MAGIC,
++        .addr = s->region_base + (uint32_t)offset,
++        .we = is_write ? 1 : 0,
++        .be = be,
++        .wdata = val,
++    };
++
++    if (send(s->sock_fd, &req, sizeof(req), 0) != (ssize_t)sizeof(req)) {
++        error_setg_errno(errp, errno, "cosim bridge: send");
++        cosim_bridge_disconnect(s);
++        return 0;
++    }
++
++    struct CosimMmioResp resp;
++    ssize_t n = recv(s->sock_fd, &resp, sizeof(resp), MSG_WAITALL);
++    if (n != (ssize_t)sizeof(resp)) {
++        error_setg_errno(errp, errno, "cosim bridge: recv");
++        cosim_bridge_disconnect(s);
++        return 0;
++    }
++    if (resp.magic != COSIM_RESP_MAGIC) {
++        error_setg(errp, "cosim bridge: bad response magic");
++        cosim_bridge_disconnect(s);
++        return 0;
++    }
++
++    return resp.rdata;
++}
++
++static uint64_t cosim_bridge_read(void *opaque, hwaddr offset, unsigned size)
++{
++    IbexDemoCosimBridgeState *s = opaque;
++    Error *err = NULL;
++    uint32_t val = cosim_bridge_mmio(s, offset, false, 0, size, &err);
++    if (err) {
++        error_report_err(err);
++    }
++    return val;
++}
++
++static void cosim_bridge_write(void *opaque, hwaddr offset, uint64_t val,
++                               unsigned size)
++{
++    IbexDemoCosimBridgeState *s = opaque;
++    Error *err = NULL;
++    cosim_bridge_mmio(s, offset, true, (uint32_t)val, size, &err);
++    if (err) {
++        error_report_err(err);
++    }
++}
++
++static const MemoryRegionOps cosim_bridge_ops = {
++    .read = cosim_bridge_read,
++    .write = cosim_bridge_write,
++    .endianness = DEVICE_NATIVE_ENDIAN,
++    .valid = {
++        .min_access_size = 1,
++        .max_access_size = 4,
++    },
++};
++
++static void cosim_bridge_init(Object *obj)
++{
++    IbexDemoCosimBridgeState *s = IBEXDEMO_COSIM_BRIDGE(obj);
++
++    memory_region_init_io(&s->mmio, obj, &cosim_bridge_ops, s,
++                          TYPE_IBEXDEMO_COSIM_BRIDGE, 0x1000);
++    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
++}
++
++static void cosim_bridge_realize(DeviceState *dev, Error **errp)
++{
++    IbexDemoCosimBridgeState *s = IBEXDEMO_COSIM_BRIDGE(dev);
++
++    if (!s->socket_path || !s->socket_path[0]) {
++        error_setg(errp, "cosim bridge: socket-path property required");
++        return;
++    }
++
++    s->sock_fd = -1;
++}
++
++static void cosim_bridge_unrealize(DeviceState *dev)
++{
++    IbexDemoCosimBridgeState *s = IBEXDEMO_COSIM_BRIDGE(dev);
++    cosim_bridge_disconnect(s);
++}
++
++static const Property cosim_bridge_properties[] = {
++    DEFINE_PROP_STRING("socket-path", IbexDemoCosimBridgeState, socket_path),
++    DEFINE_PROP_UINT32("region-base", IbexDemoCosimBridgeState, region_base,
++                      0x80000000u),
++};
++
++static void cosim_bridge_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->realize = cosim_bridge_realize;
++    dc->unrealize = cosim_bridge_unrealize;
++    device_class_set_props(dc, cosim_bridge_properties);
++}
++
++static const TypeInfo cosim_bridge_info = {
++    .name = TYPE_IBEXDEMO_COSIM_BRIDGE,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(IbexDemoCosimBridgeState),
++    .instance_init = cosim_bridge_init,
++    .class_init = cosim_bridge_class_init,
++};
++
++static void cosim_bridge_register_types(void)
++{
++    type_register_static(&cosim_bridge_info);
++}
++
++type_init(cosim_bridge_register_types);
+diff --git a/hw/ibexdemo/meson.build b/hw/ibexdemo/meson.build
+index 4a7223a..6c40fde 100644
+--- a/hw/ibexdemo/meson.build
++++ b/hw/ibexdemo/meson.build
+@@ -5,3 +5,4 @@ system_ss.add(when: 'CONFIG_IBEXDEMO_SIMCTRL', if_true: files('ibexdemo_simctrl.
+ system_ss.add(when: 'CONFIG_IBEXDEMO_SPI', if_true: files('ibexdemo_spi.c'))
+ system_ss.add(when: 'CONFIG_IBEXDEMO_TIMER', if_true: files('ibexdemo_timer.c'))
+ system_ss.add(when: 'CONFIG_IBEXDEMO_UART', if_true: files('ibexdemo_uart.c'))
++system_ss.add(when: 'CONFIG_IBEXDEMO_COSIM_BRIDGE', if_true: files('ibexdemo_cosim_bridge.c'))
+diff --git a/hw/riscv/Kconfig b/hw/riscv/Kconfig
+index 68a00b7..8580d6e 100644
+--- a/hw/riscv/Kconfig
++++ b/hw/riscv/Kconfig
+@@ -124,6 +124,7 @@ config IBEXDEMO
+     select IBEX
+     select IBEX_CLOCK_SRC
+     select IBEX_COMMON
++    select IBEXDEMO_COSIM_BRIDGE
+     select IBEXDEMO_GPIO
+     select IBEXDEMO_SIMCTRL
+     select IBEXDEMO_SPI
+diff --git a/hw/riscv/ibexdemo.c b/hw/riscv/ibexdemo.c
+index 1d16e62..d21335d 100644
+--- a/hw/riscv/ibexdemo.c
++++ b/hw/riscv/ibexdemo.c
+@@ -25,6 +25,7 @@
+ #include "cpu.h"
+ #include "hw/boards.h"
+ #include "hw/display/st7735.h"
++#include "hw/ibexdemo/ibexdemo_cosim_bridge.h"
+ #include "hw/ibexdemo/ibexdemo_gpio.h"
+ #include "hw/ibexdemo/ibexdemo_simctrl.h"
+ #include "hw/ibexdemo/ibexdemo_spi.h"
+@@ -112,7 +113,7 @@ enum IbexDemoBoardDevice {
+ 
+ #define PULP_DM_BASE   0x00010000u
+ #define SRAM_MAIN_BASE 0x100000u
+-#define SRAM_MAIN_SIZE 0x10000u
++#define SRAM_MAIN_SIZE 0x20000u
+ 
+ #define NUM_PWM_MODULES 12u
+ #define PWM_SIZE        (NUM_PWM_MODULES * 8u)
+@@ -251,6 +252,144 @@ static const IbexDeviceDef ibexdemo_soc_devices[] = {
+     /* clang-format on */
+ };
+ 
++static const IbexDeviceDef ibexdemo_cosim_soc_devices[] = {
++    /* clang-format off */
++    [IBEXDEMO_SOC_DEV_HART] = {
++        .type = TYPE_RISCV_CPU_LOWRISC_IBEXDEMO,
++        .cfg = &ibexdemo_soc_hart_configure,
++        .prop = IBEXDEVICEPROPDEFS(
++            IBEX_DEV_UINT_PROP("mtvec", 0x00100001u),
++            IBEX_DEV_UINT_PROP("dmhaltvec", PULP_DM_BASE +
++                PULP_RV_DM_ROM_BASE + PULP_RV_DM_HALT_OFFSET),
++            IBEX_DEV_UINT_PROP("dmexcpvec", PULP_DM_BASE +
++                PULP_RV_DM_ROM_BASE + PULP_RV_DM_EXCEPTION_OFFSET)
++        ),
++    },
++    [IBEXDEMO_SOC_DEV_TAP_CTRL] = {
++        .type = TYPE_TAP_CTRL_RBB,
++        .cfg = &ibexdemo_soc_tap_ctrl_configure,
++        .prop = IBEXDEVICEPROPDEFS(
++            IBEX_DEV_UINT_PROP("ir_length", IBEX_TAP_IR_LENGTH),
++            IBEX_DEV_UINT_PROP("idcode", IBEXDEMO_TAP_IDCODE)
++        ),
++    },
++    [IBEXDEMO_SOC_DEV_DTM] = {
++        .type = TYPE_RISCV_DTM,
++        .link = IBEXDEVICELINKDEFS(
++            IBEXDEMO_SOC_DEVLINK("tap-ctrl", TAP_CTRL)
++        ),
++        .prop = IBEXDEVICEPROPDEFS(
++            IBEX_DEV_UINT_PROP("abits", 7u)
++        ),
++    },
++    [IBEXDEMO_SOC_DEV_DM] = {
++        .type = TYPE_RISCV_DM,
++        .cfg = &ibexdemo_soc_dm_configure,
++        .link = IBEXDEVICELINKDEFS(
++            IBEXDEMO_SOC_DEVLINK("dtm", DTM)
++        ),
++        .prop = IBEXDEVICEPROPDEFS(
++            IBEX_DEV_UINT_PROP("nscratch", PULP_RV_DM_NSCRATCH_COUNT),
++            IBEX_DEV_UINT_PROP("progbuf_count",
++                PULP_RV_DM_PROGRAM_BUFFER_COUNT),
++            IBEX_DEV_UINT_PROP("data_count", PULP_RV_DM_DATA_COUNT),
++            IBEX_DEV_UINT_PROP("abstractcmd_count",
++                PULP_RV_DM_ABSTRACTCMD_COUNT),
++            IBEX_DEV_UINT_PROP("dm_phyaddr", PULP_DM_BASE),
++            IBEX_DEV_UINT_PROP("rom_phyaddr",
++                PULP_DM_BASE + PULP_RV_DM_ROM_BASE),
++            IBEX_DEV_UINT_PROP("whereto_phyaddr",
++                PULP_DM_BASE + PULP_RV_DM_WHERETO_OFFSET),
++            IBEX_DEV_UINT_PROP("data_phyaddr",
++                PULP_DM_BASE + PULP_RV_DM_DATAADDR_OFFSET),
++            IBEX_DEV_UINT_PROP("progbuf_phyaddr",
++                PULP_DM_BASE + PULP_RV_DM_PROGRAM_BUFFER_OFFSET),
++            IBEX_DEV_UINT_PROP("resume_offset", PULP_RV_DM_RESUME_OFFSET),
++            IBEX_DEV_BOOL_PROP("sysbus_access", true),
++            IBEX_DEV_BOOL_PROP("abstractauto", false)
++        ),
++    },
++    [IBEXDEMO_SOC_DEV_RV_DM] = {
++        .type = TYPE_PULP_RV_DM,
++        .memmap = MEMMAPENTRIES(
++            { .base = 0x00000000u }
++        ),
++        .gpio = IBEXGPIOCONNDEFS(
++            IBEXDEMO_DM_CONNECTION(IBEXDEMO_SOC_DEV_DM, 0),
++            IBEXDEMO_DM_CONNECTION(IBEXDEMO_SOC_DEV_DM, 1),
++            IBEXDEMO_DM_CONNECTION(IBEXDEMO_SOC_DEV_DM, 2),
++            IBEXDEMO_DM_CONNECTION(IBEXDEMO_SOC_DEV_DM, 3)
++        ),
++    },
++    [IBEXDEMO_SOC_DEV_SIM_CTRL] = {
++        .type = TYPE_IBEXDEMO_SIMCTRL,
++        .memmap = MEMMAPENTRIES(
++            { .base = 0x00020000u }
++        ),
++    },
++    [IBEXDEMO_SOC_DEV_GPIO] = {
++        .type = TYPE_IBEXDEMO_COSIM_BRIDGE,
++        .memmap = MEMMAPENTRIES(
++            { .base = 0x80000000u }
++        ),
++        .prop = IBEXDEVICEPROPDEFS(
++            IBEX_DEV_STRING_PROP("socket-path", "/tmp/ibexdemo-cosim.sock")
++        ),
++    },
++    [IBEXDEMO_SOC_DEV_UART] = {
++        .type = TYPE_IBEXDEMO_UART,
++        .cfg = &ibexdemo_soc_uart_configure,
++        .memmap = MEMMAPENTRIES(
++            { .base = 0x80001000u }
++        ),
++        .gpio = IBEXGPIOCONNDEFS(
++            IBEX_GPIO_SYSBUS_IRQ(0, IBEXDEMO_SOC_DEV_HART, 16)
++        ),
++    },
++    [IBEXDEMO_SOC_DEV_TIMER] = {
++        .type = TYPE_IBEXDEMO_TIMER,
++        .memmap = MEMMAPENTRIES(
++            { .base = 0x80002000u }
++        ),
++        .gpio = IBEXGPIOCONNDEFS(
++            IBEX_GPIO_SYSBUS_IRQ(0, IBEXDEMO_SOC_DEV_HART, IRQ_M_TIMER)
++        ),
++    },
++    [IBEXDEMO_SOC_DEV_PWM] = {
++        .type = TYPE_UNIMPLEMENTED_DEVICE,
++        .name = "ibexdemo-pwm",
++        .cfg = &ibex_unimp_configure,
++        .memmap = MEMMAPENTRIES(
++            { .base = 0x80003000u }
++        ),
++        .prop = IBEXDEVICEPROPDEFS(
++            IBEX_DEV_UINT_PROP("size", PWM_SIZE)
++        ),
++    },
++    [IBEXDEMO_SOC_DEV_SPI] = {
++        .type = TYPE_IBEXDEMO_SPI,
++        .memmap = MEMMAPENTRIES(
++            { .base = 0x80004000u }
++        ),
++    },
++    /* clang-format on */
++};
++
++static const IbexDeviceDef *ibexdemo_soc_devtab(void)
++{
++    MachineState *ms = MACHINE(qdev_get_machine());
++
++    if (object_dynamic_cast(OBJECT(ms), TYPE_RISCV_IBEXDEMO_COSIM_MACHINE)) {
++        return ibexdemo_cosim_soc_devices;
++    }
++    return ibexdemo_soc_devices;
++}
++
++static size_t ibexdemo_soc_devtab_size(void)
++{
++    return ARRAY_SIZE(ibexdemo_soc_devices);
++}
++
+ /* ------------------------------------------------------------------------ */
+ /* Type definitions */
+ /* ------------------------------------------------------------------------ */
+@@ -276,6 +415,12 @@ struct IbexDemoMachineState {
+     char *rv_exts;
+ };
+ 
++struct IbexDemoCosimMachineState {
++    MachineState parent_obj;
++
++    char *rv_exts;
++};
++
+ /* ------------------------------------------------------------------------ */
+ /* Device Configuration */
+ /* ------------------------------------------------------------------------ */
+@@ -376,16 +521,14 @@ static void ibexdemo_soc_realize(DeviceState *dev, Error **errp)
+     MemoryRegion *sys_mem = get_system_memory();
+     memory_region_add_subregion(sys_mem, SRAM_MAIN_BASE, ms->ram);
+ 
+-    ibex_link_devices(s->devices, ibexdemo_soc_devices,
+-                      ARRAY_SIZE(ibexdemo_soc_devices));
+-    ibex_define_device_props(s->devices, ibexdemo_soc_devices,
+-                             ARRAY_SIZE(ibexdemo_soc_devices));
+-    ibex_realize_system_devices(s->devices, ibexdemo_soc_devices,
+-                                ARRAY_SIZE(ibexdemo_soc_devices));
+-    ibex_clock_devices(s->devices, ibexdemo_soc_devices,
+-                       ARRAY_SIZE(ibexdemo_soc_devices));
+-    ibex_connect_devices(s->devices, ibexdemo_soc_devices,
+-                         ARRAY_SIZE(ibexdemo_soc_devices));
++    const IbexDeviceDef *devtab = ibexdemo_soc_devtab();
++    size_t devtab_size = ibexdemo_soc_devtab_size();
++
++    ibex_link_devices(s->devices, devtab, devtab_size);
++    ibex_define_device_props(s->devices, devtab, devtab_size);
++    ibex_realize_system_devices(s->devices, devtab, devtab_size);
++    ibex_clock_devices(s->devices, devtab, devtab_size);
++    ibex_connect_devices(s->devices, devtab, devtab_size);
+ 
+     ibexdemo_soc_load_boot();
+ 
+@@ -397,9 +540,8 @@ static void ibexdemo_soc_init(Object *obj)
+ {
+     IbexDemoSoCState *s = RISCV_IBEXDEMO_SOC(obj);
+ 
+-    s->devices =
+-        ibex_create_devices(ibexdemo_soc_devices,
+-                            ARRAY_SIZE(ibexdemo_soc_devices), DEVICE(s));
++    s->devices = ibex_create_devices(ibexdemo_soc_devtab(),
++                                     ibexdemo_soc_devtab_size(), DEVICE(s));
+ }
+ 
+ static const Property ibexdemo_soc_props[] = {
+@@ -460,10 +602,13 @@ static void ibexdemo_board_realize(DeviceState *dev, Error **errp)
+     dc = qdev_get_gpio_in_named(dev, ST7735_IO_LINES, ST7735_IO_D_C);
+     rst = qdev_get_gpio_in_named(dev, ST7735_IO_LINES, ST7735_IO_RESET);
+ 
+-    dev = soc->devices[IBEXDEMO_SOC_DEV_GPIO];
+-    qdev_connect_gpio_out_named(dev, IBEXDEMO_GPIO_OUT_LINES, 0, cs);
+-    qdev_connect_gpio_out_named(dev, IBEXDEMO_GPIO_OUT_LINES, 1, rst);
+-    qdev_connect_gpio_out_named(dev, IBEXDEMO_GPIO_OUT_LINES, 2, dc);
++    if (!object_dynamic_cast(OBJECT(qdev_get_machine()),
++                             TYPE_RISCV_IBEXDEMO_COSIM_MACHINE)) {
++        dev = soc->devices[IBEXDEMO_SOC_DEV_GPIO];
++        qdev_connect_gpio_out_named(dev, IBEXDEMO_GPIO_OUT_LINES, 0, cs);
++        qdev_connect_gpio_out_named(dev, IBEXDEMO_GPIO_OUT_LINES, 1, rst);
++        qdev_connect_gpio_out_named(dev, IBEXDEMO_GPIO_OUT_LINES, 2, dc);
++    }
+ }
+ 
+ static void ibexdemo_board_instance_init(Object *obj)
+@@ -539,3 +684,42 @@ static void ibexdemo_machine_register_types(void)
+ }
+ 
+ type_init(ibexdemo_machine_register_types);
++
++/* ------------------------------------------------------------------------ */
++/* Cosim machine (Verilator GPIO at 0x8000_0000) */
++/* ------------------------------------------------------------------------ */
++
++static void ibexdemo_cosim_machine_init(MachineState *state)
++{
++    DeviceState *board = qdev_new(TYPE_RISCV_IBEXDEMO_BOARD);
++
++    object_property_add_child(OBJECT(state), "board", OBJECT(board));
++    qdev_realize(board, NULL, &error_fatal);
++}
++
++static void ibexdemo_cosim_machine_class_init(ObjectClass *oc, const void *data)
++{
++    MachineClass *mc = MACHINE_CLASS(oc);
++    (void)data;
++
++    mc->desc = "IbexDemo with Verilator cosim GPIO (unix socket)";
++    mc->init = ibexdemo_cosim_machine_init;
++    mc->max_cpus = 1u;
++    mc->default_cpu_type = ibexdemo_soc_devices[IBEXDEMO_SOC_DEV_HART].type;
++    mc->default_ram_id = "ibexdemo.ram";
++    mc->default_ram_size = SRAM_MAIN_SIZE;
++}
++
++static const TypeInfo ibexdemo_cosim_machine_type_info = {
++    .name = TYPE_RISCV_IBEXDEMO_COSIM_MACHINE,
++    .parent = TYPE_MACHINE,
++    .instance_size = sizeof(IbexDemoCosimMachineState),
++    .class_init = ibexdemo_cosim_machine_class_init,
++};
++
++static void ibexdemo_cosim_machine_register_types(void)
++{
++    type_register_static(&ibexdemo_cosim_machine_type_info);
++}
++
++type_init(ibexdemo_cosim_machine_register_types);
+diff --git a/include/hw/ibexdemo/ibexdemo_cosim_bridge.h b/include/hw/ibexdemo/ibexdemo_cosim_bridge.h
+new file mode 100644
+index 0000000..557aba8
+--- /dev/null
++++ b/include/hw/ibexdemo/ibexdemo_cosim_bridge.h
+@@ -0,0 +1,26 @@
++/*
++ * QEMU Ibex Demo cosim MMIO bridge (forwards to Verilator socket server)
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef HW_IBEXDEMO_IBEXDEMO_COSIM_BRIDGE_H
++#define HW_IBEXDEMO_IBEXDEMO_COSIM_BRIDGE_H
++
++#include "hw/sysbus.h"
++#include "qom/object.h"
++
++#define TYPE_IBEXDEMO_COSIM_BRIDGE "ibexdemo-cosim-bridge"
++
++OBJECT_DECLARE_SIMPLE_TYPE(IbexDemoCosimBridgeState, IBEXDEMO_COSIM_BRIDGE)
++
++struct IbexDemoCosimBridgeState {
++    SysBusDevice parent_obj;
++
++    MemoryRegion mmio;
++    char *socket_path;
++    uint32_t region_base;
++    int sock_fd;
++};
++
++#endif
+diff --git a/include/hw/riscv/ibexdemo.h b/include/hw/riscv/ibexdemo.h
+index 1060e01..36c3feb 100644
+--- a/include/hw/riscv/ibexdemo.h
++++ b/include/hw/riscv/ibexdemo.h
+@@ -30,4 +30,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(IbexDemoBoardState, RISCV_IBEXDEMO_BOARD)
+ #define TYPE_RISCV_IBEXDEMO_SOC "riscv.ibexdemo.soc"
+ OBJECT_DECLARE_SIMPLE_TYPE(IbexDemoSoCState, RISCV_IBEXDEMO_SOC)
+ 
++#define TYPE_RISCV_IBEXDEMO_COSIM_MACHINE MACHINE_TYPE_NAME("ibexdemo-cosim")
++OBJECT_DECLARE_SIMPLE_TYPE(IbexDemoCosimMachineState, RISCV_IBEXDEMO_COSIM_MACHINE)
++
++#define TYPE_RISCV_IBEXDEMO_COSIM_SOC "riscv.ibexdemo.cosim.soc"
++OBJECT_DECLARE_SIMPLE_TYPE(IbexDemoCosimSoCState, RISCV_IBEXDEMO_COSIM_SOC)
++
+ #endif /* HW_RISCV_IBEXDEMO_H */
+diff --git a/python/scripts/mkvenv.py b/python/scripts/mkvenv.py
+index a064709..8eb7985 100644
+--- a/python/scripts/mkvenv.py
++++ b/python/scripts/mkvenv.py
+@@ -242,10 +242,9 @@ def __init__(self, *args: Any, **kwargs: Any) -> None:
+         # is setup.
+         self.want_pip = kwargs.get("with_pip", False)
+         if self.want_pip:
+-            if (
+-                kwargs.get("system_site_packages", False)
+-                and not need_ensurepip()
+-            ):
++            if not need_ensurepip():
++                kwargs["with_pip"] = False
++            elif kwargs.get("system_site_packages", False):
+                 kwargs["with_pip"] = False
+             else:
+                 check_ensurepip()
+@@ -359,6 +358,8 @@ def check_ensurepip() -> None:
+ 
+     Raise a fatal exception with a helpful hint if it isn't available.
+     """
++    if find_spec("pip"):
++        return
+     if not find_spec("ensurepip"):
+         msg = (
+             "Python's ensurepip module is not found.\n"
+-- 
+2.43.0
+

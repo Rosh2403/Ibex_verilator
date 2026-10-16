@@ -1,0 +1,30 @@
+CAPI=2:
+name: "lowrisc:ibex:demo_cosim_gpio"
+description: "Ibex Demo GPIO RTL cosim server for QEMU MMIO bridge"
+filesets:
+  files_rtl:
+    depend:
+      - lowrisc:ibex:demo_system_core
+    files:
+      - rtl/cosim_gpio_top.sv: { file_type: systemVerilogSource }
+    file_type: systemVerilogSource
+  files_cpp:
+    files:
+      - cosim_main.cc: { file_type: cppSource }
+      - include/cosim_protocol.h: { file_type: CSource, is_include_file: true }
+targets:
+  default: &default_target
+    filesets:
+      - files_rtl
+      - files_cpp
+    toplevel: cosim_gpio_top
+  sim:
+    <<: *default_target
+    default_tool: verilator
+    tools:
+      verilator:
+        mode: cc
+        verilator_options:
+          - "-Wall"
+          - "-CFLAGS \"-std=c++14 -I$(cwd)/include\""
+          - "-LDFLAGS \"-pthread\""
