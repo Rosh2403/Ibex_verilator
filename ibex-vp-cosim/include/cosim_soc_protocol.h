@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: Apache-2.0
+// Full SoC cosim: QEMU steps cycle-accurate Verilator, UART over socket.
+
+#ifndef COSIM_SOC_PROTOCOL_H
+#define COSIM_SOC_PROTOCOL_H
+
+#include <stdint.h>
+
+#if defined(QEMU_PACKED)
+#define COSIM_SOC_PACKED QEMU_PACKED
+#else
+#define COSIM_SOC_PACKED __attribute__((packed))
+#endif
+
+#define COSIM_SOC_REQ_MAGIC 0x49425853u /* 'IBXS' */
+#define COSIM_SOC_RESP_MAGIC 0x49425854u /* 'IBXT' */
+
+#define COSIM_SOC_DEFAULT_SOCKET "/tmp/ibexdemo-verilator.sock"
+
+#define COSIM_SOC_CMD_STEP 1u
+#define COSIM_SOC_CMD_SHUTDOWN 2u
+#define COSIM_SOC_CMD_UART_RX 3u
+
+#define COSIM_SOC_MAX_UART_CHUNK 512u
+
+typedef struct COSIM_SOC_PACKED CosimSocReq {
+    uint32_t magic;
+    uint32_t cmd;
+    uint64_t param;
+} CosimSocReq;
+
+typedef struct COSIM_SOC_PACKED CosimSocResp {
+    uint32_t magic;
+    uint32_t uart_len;
+    uint8_t flags;
+    uint8_t reserved[3];
+} CosimSocResp;
+
+/* flags */
+#define COSIM_SOC_FLAG_STOPPED 0x01u
+
+#endif

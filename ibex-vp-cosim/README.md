@@ -1,50 +1,36 @@
-# Ibex Demo System: QEMU + Verilator cosim
+# Ibex cosim launcher (`run_cosim.sh`)
 
-Hybrid virtual platform: **QEMU** runs the Ibex CPU and most peripherals on the
-`-M ibexdemo-cosim` machine; **Verilator** simulates the **GPIO RTL** from
-`ibex-demo-system` over a Unix socket MMIO bridge.
+Cycle-accurate **full SoC** simulation: `Vtop_verilator` runs all RTL; QEMU
+`-M ibexdemo-cosim` only steps the model and shows UART on `-nographic`.
 
-For full build steps and how to tell each simulation mode is working, see the
-[workspace README](../README.md).
-
-## Prerequisites
-
-Build from the parent tree (`Ibex_verilator/`):
-
-- Verilator (local install under `local/` or on `PATH`)
-- `ibex-demo-system` bare-metal ELF (`sw/c/build/demo/hello_world/demo`)
-- lowRISC QEMU with cosim patches (`qemu/build/qemu-system-riscv32`)
-
-## Build GPIO cosim server
-
-```bash
-make -C ibex-vp-cosim
-```
+**User-facing guide:** [workspace README](../README.md) (quick start, build, all three modes).
 
 ## Run
 
-```bash
-./ibex-vp-cosim/run_cosim.sh
-```
-
-Optional: pass a different ELF or extra QEMU flags:
+From the repo root (after `Vtop_verilator` and QEMU are built):
 
 ```bash
-./ibex-vp-cosim/run_cosim.sh /path/to/demo -icount shift=6
+export ROOT="$HOME/Ibex_verilator"
+export PATH="$ROOT/verilator/bin:$ROOT/toolchain/bin:$ROOT/local/bin:$HOME/.local/bin:$PATH"
+export LD_LIBRARY_PATH="$ROOT/local/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+"$ROOT/ibex-vp-cosim/run_cosim.sh"
 ```
 
-## Socket protocol
-
-See `include/cosim_protocol.h`. Smoke test without QEMU:
+Optional ELF and QEMU arguments:
 
 ```bash
-./build/Vcosim_gpio_server --socket /tmp/ibexdemo-cosim.sock &
-python3 scripts/test_gpio_client.py
+"$ROOT/ibex-vp-cosim/run_cosim.sh" "$ROOT/ibex-demo-system/sw/c/build/demo/hello_world/demo"
 ```
 
-## Extensions (PWM / timing)
+## Protocol
 
-- **PWM at `0x80003000`**: add `pwm_wrapper` to `cosim_gpio_top` and extend the
-  bridge; QEMU PWM remains `unimp` until then.
-- **Determinism**: use QEMU `-icount shift=N` to slow the vCPU while debugging
-  cosim transactions.
+`include/cosim_soc_protocol.h` — socket `/tmp/ibexdemo-verilator.sock` by default
+(`IBEXDEMO_COSIM_SOCKET` to override).
+
+## Legacy GPIO-only server
+
+`make -C ibex-vp-cosim` builds `Vcosim_gpio_server` for MMIO experiments
+(`include/cosim_protocol.h`, `scripts/test_gpio_client.py`). Not used by `run_cosim.sh`.
+
+Extensions: [docs/extend_pwm_irq.md](docs/extend_pwm_irq.md).
