@@ -1,237 +1,203 @@
-# Ibex Demo virtual platform (QEMU + Verilator)
+# Ibex Demo System: QEMU + Verilator
 
-Run the [lowRISC Ibex Demo System](https://github.com/lowRISC/ibex-demo-system) on your
-machine as a **virtual platform**: same bare-metal `hello_world` firmware, three ways
-to simulate it.
+Run the full Ibex Demo System RTL in Verilator and use QEMU as its UART console.
+The Ibex CPU, RAM, GPIO, timer, UART, PWM, and other peripherals execute in the
+RTL model. QEMU's `ibexdemo-soc-cosim` machine requests clock cycles and relays UART
+bytes over a Unix socket; it instantiates **no emulated CPU**.
 
-| Mode | Command (after build) | What it is |
-|------|------------------------|------------|
-| **1. QEMU** | `qemu-system-riscv32 -M ibexdemo` | Fast functional CPU + peripherals (try this first) |
-| **2. Verilator** | `Vtop_verilator --meminit=ram,<elf>` | Cycle-accurate full SoC RTL (slow; UART in `uart0.log`) |
-| **3. Cosim** | `ibex-vp-cosim/run_cosim.sh` | Same RTL as (2); QEMU only provides serial console |
+The source trees, native tools, firmware, and simulator binaries are already
+installed and built in this Apple Silicon workspace. For another checkout, see
+the dependency and build instructions below.
 
-> **Cheat sheet:** [CHEATSHEET.md](CHEATSHEET.md) — env + three run commands on one page.
+## Run the full-SoC demo
 
-### One-liner try (QEMU, after build)
-
-```bash
-export ROOT="$HOME/Ibex_verilator" PATH="$ROOT/verilator/bin:$ROOT/toolchain/bin:$ROOT/local/bin:$HOME/.local/bin:$PATH" LD_LIBRARY_PATH="$ROOT/local/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" && timeout 10 "$ROOT/qemu/build/qemu-system-riscv32" -M ibexdemo -nographic -kernel "$ROOT/ibex-demo-system/sw/c/build/demo/hello_world/demo"
-```
-
-## Quick start (try the simulator)
-
-Assumes this repo lives at `~/Ibex_verilator` and you already built QEMU and the demo ELF
-(see [Build once](#build-once) if not).
+From the repository root:
 
 ```bash
-export ROOT="$HOME/Ibex_verilator"
-export PATH="$ROOT/verilator/bin:$ROOT/toolchain/bin:$ROOT/local/bin:$HOME/.local/bin:$PATH"
-export LD_LIBRARY_PATH="$ROOT/local/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-
-ELF="$ROOT/ibex-demo-system/sw/c/build/demo/hello_world/demo"
-
-# --- Fastest: QEMU Ibex (seconds) ---
-timeout 10 "$ROOT/qemu/build/qemu-system-riscv32" \
-  -M ibexdemo -nographic -kernel "$ELF"
+source ./env.sh
+./ibex-vp-cosim/run_cosim.sh
 ```
 
-You should see repeating lines like:
+The launcher starts Verilator, loads the hello-world ELF into RTL RAM, waits for
+the socket, and starts QEMU. Expected console output:
 
 ```text
+Full SoC runs in Verilator; QEMU provides stepping and the UART console.
+Logs: .../ibex-vp-cosim/build/soc-run.XXXXXX
 Hello World! 00000001   Input Value: 00000000
 Hello World! 00000002   Input Value: 00000000
 ```
 
-**What the numbers mean**
+Type a character such as `Z` to demonstrate UART input. The RTL UART receives it,
+the Ibex firmware handles its RX interrupt, and the firmware echoes it through
+the RTL UART and QEMU console. The hexadecimal counter is a firmware timer tick.
+GPIO input pins are tied to zero in the full-SoC testbench.
 
-| Part | Meaning |
-|------|---------|
-| `00000001`, `00000002`, … | Hex **timer tick** from the demo firmware (not CPU cycles). |
-| `Input Value: 00000000` | Hex **GPIO inputs**; often zero in sim unless pins are driven. |
+Exit with **Ctrl+A, then X**. Ctrl+C also stops the launcher and its child
+processes; QEMU's console can forward Ctrl+C to the guest, so use Ctrl+A, X for
+the normal demo exit. The launcher cleans up its socket and children and preserves
+`verilator.log` and `uart0.log` in the printed log directory.
 
-Press Ctrl+C to stop (or wait for `timeout`).
+First output appeared in a few seconds on the prepared Mac; other hosts and
+firmware can take longer. This simulation runs in batches of 100,000 RTL cycles
+and is not synchronized to wall-clock time.
 
-**Cycle-accurate run (needs `Vtop_verilator` built):**
-
-```bash
-"$ROOT/ibex-vp-cosim/run_cosim.sh"
-```
-
-First `Hello World!` can take **30–60 seconds** (RTL is slow). Output appears on the
-same terminal. Stop with Ctrl+C.
-
----
-
-## Repository layout
-
-```text
-Ibex_verilator/
-  CHEATSHEET.md       # Copy-paste env + run commands
-  ibex-demo-system/   # SoC RTL, FuseSoC build, demo software
-  qemu/               # QEMU with ibexdemo + ibexdemo-cosim machines
-  verilator/          # Verilator compiler (add verilator/bin to PATH)
-  ibex-vp-cosim/      # run_cosim.sh and cosim protocol headers
-  toolchain/          # riscv32-unknown-elf-gcc (unpack lowRISC toolchain here)
-  local/              # Optional: extra libs/tools from local bootstrap
-```
-
----
-
-## Prerequisites
-
-- **RISC-V GCC**: `riscv32-unknown-elf-gcc` in `toolchain/bin/`
-- **CMake** + **make**: demo firmware (`~/.local/bin` is fine for `cmake`)
-- **Verilator** on `PATH`: use `$ROOT/verilator/bin` after building from `verilator/`
-- **QEMU build**: Python 3, **ninja**, **meson** (QEMU’s `build/pyvenv` if needed)
-- **Full RTL sim**: FuseSoC + Python deps from `ibex-demo-system/python-requirements.txt`
-
----
-
-## Build once
-
-Set paths for every build terminal:
+Use a different firmware ELF, a custom socket, or additional QEMU arguments:
 
 ```bash
-export ROOT="$HOME/Ibex_verilator"
-export PATH="$ROOT/verilator/bin:$ROOT/toolchain/bin:$ROOT/local/bin:$HOME/.local/bin:$PATH"
-export LD_LIBRARY_PATH="$ROOT/local/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+./ibex-vp-cosim/run_cosim.sh /absolute/path/to/firmware.elf
+IBEXDEMO_COSIM_SOCKET=/tmp/my-ibex-soc.sock ./ibex-vp-cosim/run_cosim.sh
+./ibex-vp-cosim/run_cosim.sh "$ELF" -S
 ```
 
-### 1. Demo firmware (required for all modes)
+With `-S`, press Ctrl+A, C to open the QEMU monitor and enter `cont`; switch back
+to the UART console with Ctrl+A, C. Pausing QEMU stops new stepping requests.
+QEMU GDB and register commands do not expose the RTL CPU; use RTL waveforms for
+debugging. This integration does not perform instruction lockstep comparison.
+
+## Rebuild the integration
 
 ```bash
-cd "$ROOT/ibex-demo-system"
-mkdir -p sw/c/build && cd sw/c/build
-cmake .. && make demo
+source ./env.sh
+./ibex-vp-cosim/build_full_soc.sh
 ```
 
-ELF:
+The builder applies the provided patches when needed, copies the bridge sources
+into the external trees, rebuilds QEMU, and builds the full-SoC Verilator model
+with FuseSoC. It can be rerun after editing `ibex-vp-cosim/full_soc/` or the shared
+protocol header. Maintain those files in this repository; edits to their copies
+in the external trees will be replaced by the builder.
 
-```text
-$ROOT/ibex-demo-system/sw/c/build/demo/hello_world/demo
-```
+The prepared native environment and firmware build adjustments are documented
+in [LOCAL_SETUP.md](LOCAL_SETUP.md). If you change firmware sources, rebuild them
+with the commands there before launching again.
 
-### 2. QEMU (required for modes 1 and 3)
+## Dependencies for a fresh checkout
+
+External source trees and tool installations are ignored by Git. You need:
+
+- Git, a C/C++ compiler, Make, CMake, Python 3, Ninja, Meson, pkg-config, and Rust.
+- Verilator and the lowRISC FuseSoC/Edalize Python dependencies.
+- GLib, Pixman, zlib, libelf, and LZ4 development libraries.
+- A bare-metal RISC-V GCC toolchain supporting RV32IMC, CSR, and instruction fence
+  instructions, available through the `riscv32-unknown-elf-*` tool names.
+
+Fetch the external sources only if the directories do not already exist:
 
 ```bash
-cd "$ROOT/qemu"
-mkdir -p build && cd build
-../configure --target-list=riscv32-softmmu --without-default-features --enable-tcg --enable-tools
-ninja qemu-system-riscv32
+git clone --recursive https://github.com/lowRISC/ibex-demo-system.git ibex-demo-system
+git clone --branch ot-10.2.0 https://github.com/lowRISC/qemu.git qemu
+source ./env.sh
+python3 -m pip install -r ibex-demo-system/python-requirements.txt
 ```
 
-Binary: `$ROOT/qemu/build/qemu-system-riscv32`
-
-If `configure` fails on the Python venv, see notes in `qemu/python/scripts/mkvenv.py`.
-
-### 3. Verilator full SoC (required for modes 2 and 3)
+Use a Python environment appropriate for your host. On this Mac it is
+`local/env/`. Tested source revisions and tool versions are in `LOCAL_SETUP.md`.
+For current GCC and CMake, build the firmware with:
 
 ```bash
-cd "$ROOT/ibex-demo-system"
-fusesoc --cores-root=. run --target=sim --tool=verilator --setup --build lowrisc:ibex:demo_system
+cmake -S "$ROOT/ibex-demo-system/sw/c" -B "$ROOT/ibex-demo-system/sw/c/build" \
+  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+  '-DCMAKE_C_FLAGS=-march=rv32imc_zicsr_zifencei -mabi=ilp32 -mcmodel=medany -Wall -fvisibility=hidden -ffreestanding' \
+  '-DCMAKE_ASM_FLAGS=-march=rv32imc_zicsr_zifencei -mabi=ilp32'
+cmake --build "$ROOT/ibex-demo-system/sw/c/build" --target demo
+./ibex-vp-cosim/build_full_soc.sh
 ```
 
-Binary:
+The builder configures QEMU if needed, and never downloads dependencies itself.
+Fresh builds require libraries discoverable by your compiler and pkg-config.
+It adds the local macOS libelf/LZ4 paths when `local/env/lib/libelf.a` is present.
 
-```text
-$ROOT/ibex-demo-system/build/lowrisc_ibex_demo_system_0/sim-verilator/Vtop_verilator
-```
+## Other simulation modes
 
-This tree’s `ibex_demo_system.core` already passes **`-Wno-UNOPTFLAT`** to Verilator.
-If an older `config.mk` still fails on `UNOPTFLAT`, add that flag there and run:
+### QEMU only
+
+This is the fast functional baseline; QEMU emulates both the CPU and peripherals:
 
 ```bash
-make -C "$ROOT/ibex-demo-system/build/lowrisc_ibex_demo_system_0/sim-verilator" -j"$(nproc)"
+source ./env.sh
+"$QEMU" -M ibexdemo -nographic -kernel "$ELF"
 ```
 
-`verible-verilog-syntax` missing during FuseSoC setup is OK (regex fallback).
+### Standalone full-SoC Verilator
 
----
-
-## Run and verify
-
-Use the same `ROOT`, `PATH`, `LD_LIBRARY_PATH`, and `ELF` as in [Quick start](#quick-start-try-the-simulator).
-
-### Mode 1 — QEMU only (recommended first test)
+The same RTL simulator works without a QEMU connection when the socket option
+is omitted. UART goes to `uart0.log` and the testbench's pseudo-terminal:
 
 ```bash
-timeout 10 "$ROOT/qemu/build/qemu-system-riscv32" \
-  -M ibexdemo -nographic -kernel "$ELF"
+source ./env.sh
+cd "$ROOT/ibex-demo-system/build/lowrisc_ibex_demo_system_0/sim-verilator"
+./Vtop_verilator --meminit=ram,"$ELF"
 ```
 
-**Pass:** `Hello World!` lines with increasing timer hex and `Input Value:` on the console.
+Read `uart0.log` from another terminal and stop with Ctrl+C.
 
-### Mode 2 — Verilator only (full RTL)
+### QEMU CPU + Verilator GPIO
+
+The older `ibexdemo-cosim` machine simulates only GPIO in RTL. It remains available
+for peripheral experiments and uses a different socket protocol.
+
+Terminal A:
 
 ```bash
-SIM="$ROOT/ibex-demo-system/build/lowrisc_ibex_demo_system_0/sim-verilator"
-cd "$SIM"
-rm -f uart0.log
-timeout 60 ./Vtop_verilator --meminit=ram,"$ELF"
-cat uart0.log
-```
-
-**Pass:** `uart0.log` contains `Hello World!` / `Input Value` (may take up to ~60s wall time).
-Startup text on the terminal (`Simulation running…`) is from the testbench, not the firmware.
-
-### Mode 3 — Cycle-accurate cosim (RTL + QEMU console)
-
-Starts `Vtop_verilator` with `--qemu-cosim-socket` and QEMU `-M ibexdemo-cosim`
-(QEMU does **not** emulate the CPU; it steps Verilator and forwards UART).
-
-```bash
-"$ROOT/ibex-vp-cosim/run_cosim.sh"
-# optional: different ELF or extra QEMU args
-# "$ROOT/ibex-vp-cosim/run_cosim.sh" "$ELF"
-```
-
-**Pass:** same UART lines as mode 1 on the console; first line may take 30–60s.
-
-```text
-  QEMU (-M ibexdemo-cosim)              Vtop_verilator (full SoC)
-  serial / -nographic        <---UART---  stepped via /tmp/ibexdemo-verilator.sock
-```
-
-More detail: [ibex-vp-cosim/README.md](ibex-vp-cosim/README.md).
-
-### Optional — GPIO socket smoke test (developers)
-
-Legacy GPIO-only Verilator server (not used by `run_cosim.sh`):
-
-```bash
+source ./env.sh
 make -C "$ROOT/ibex-vp-cosim"
-cd "$ROOT/ibex-vp-cosim"
-rm -f /tmp/ibexdemo-cosim.sock
-./build/Vcosim_gpio_server --socket /tmp/ibexdemo-cosim.sock &
-sleep 0.3
-python3 scripts/test_gpio_client.py
-kill %1 2>/dev/null
+"$ROOT/ibex-vp-cosim/build/Vcosim_gpio_server" --socket /tmp/ibexdemo-cosim.sock
 ```
 
-**Pass:** `GPIO OUT readback: 0x0000beef`.
+Terminal B:
 
----
+```bash
+source ./env.sh
+python3 "$ROOT/ibex-vp-cosim/scripts/test_gpio_client.py"
+"$QEMU" -M ibexdemo-cosim -nographic -kernel "$ELF"
+```
+
+The GPIO smoke test should print `GPIO OUT readback: 0x0000beef`. This GPIO bridge
+is distinct from the full-SoC machine `ibexdemo-soc-cosim`.
+
+## Verification
+
+```bash
+source ./env.sh
+python3 ibex-vp-cosim/scripts/test_full_soc.py
+```
+
+The seven integration tests cover real RTL firmware output, UART interrupt echo,
+absence of a QEMU CPU, start-paused behavior, fragmented socket requests, bounded
+cycle execution, invalid requests/responses, disconnects, and launcher cleanup.
+They pass on the prepared Apple Silicon Mac. Build and test logs are in `deps/`.
 
 ## Troubleshooting
 
-| Symptom | Likely fix |
-|---------|------------|
-| `verilator: not found` during FuseSoC | `export PATH="$ROOT/verilator/bin:$PATH"` before `fusesoc`. |
-| `cmake: not found` | `export PATH="$HOME/.local/bin:$PATH"` or install CMake. |
-| FuseSoC `UNOPTFLAT` / exit code 4 | Re-run setup with current `ibex_demo_system.core`, or add `-Wno-UNOPTFLAT` to `sim-verilator/config.mk` and `make` there. |
-| QEMU fault at boot | QEMU build should use 128 KiB RAM (`SRAM_MAIN_SIZE 0x20000` in `qemu/hw/riscv/ibexdemo.c`). |
-| Cosim: `verilator iface: connect` | Start `run_cosim.sh` (starts Verilator first); check `/tmp/ibexdemo-verilator.sock`. |
-| Cosim: no UART for a long time | Normal; wait 30–60s for first `Hello World!`. |
-| Verilator: empty `uart0.log` after a few seconds | Use `timeout 60` or longer; read `uart0.log` in the sim directory. |
-| Missing `libelf` / `lz4` for `Vtop_verilator` | Use libs under `local/usr` and `LD_LIBRARY_PATH` as above. |
-| FuseSoC / `mako` errors | `pip install -r ibex-demo-system/python-requirements.txt` |
+- **Missing tools or libraries:** source `env.sh` and review `LOCAL_SETUP.md`.
+- **Old simulator binaries:** run `ibex-vp-cosim/build_full_soc.sh`. QEMU's machine
+  list must contain `ibexdemo-soc-cosim`; the Verilator help must show
+  `--qemu-cosim-socket=PATH`.
+- **No UART output:** inspect the printed run directory's `verilator.log`; confirm
+  the same ELF works in standalone RTL mode and QEMU has not been paused with `-S`.
+- **Socket already exists:** stop its owning process before removing a stale
+  socket. By default each launch gets its own socket directory under `/tmp`.
+- **Protocol errors or response timeout:** rebuild both simulators together. The
+  QEMU client rejects incompatible responses and stops if no response arrives
+  within ten seconds; very slow hosts or waveform-heavy runs may hit that limit.
+- **Using `-kernel` with full-SoC QEMU:** pass the ELF to `run_cosim.sh` instead.
+  Verilator loads and executes it; this QEMU machine has no CPU or emulated RAM.
 
----
+## Integration source map
 
-## Optional: FST traces (Verilator)
+- `ibex-vp-cosim/full_soc/soc_cosim.h`: RTL stepping server and UART byte queues.
+- `ibex-vp-cosim/full_soc/ibexdemo_soc_cosim.c`: QEMU machine and asynchronous client.
+- `ibex-vp-cosim/include/cosim_soc_protocol.h`: versioned, little-endian socket protocol.
+- `patches/0003-full-soc-verilator-hooks.patch`: simulator registration and UART DPI hooks.
+- `ibex-vp-cosim/build_full_soc.sh`: patch application and simulator builds.
+- `ibex-vp-cosim/run_cosim.sh`: demo launch, console, and process cleanup.
 
-```bash
-cd "$ROOT/ibex-demo-system/build/lowrisc_ibex_demo_system_0/sim-verilator"
-./Vtop_verilator --meminit=ram,"$ELF" -t
-# then open sim.fst with GTKWave
-```
+Protocol details: [ibex-vp-cosim/README.md](ibex-vp-cosim/README.md).
+Presentation commands: [CHEATSHEET.md](CHEATSHEET.md).
+
+For the separately proposed QEMU-CPU instruction/cycle synchronization mode, see
+[the strict lock-step design](docs/LOCKSTEP_DESIGN.md). It specifies per-edge
+handshakes, MMIO completion stalls, clock accounting, and required QEMU core
+changes. It is a design, not an implemented mode or a claim that instruction
+counting reproduces physical Ibex CPU timing.

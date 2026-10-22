@@ -1,0 +1,12 @@
+diff --git a/hw/riscv/meson.build b/hw/riscv/meson.build
+index 9b59949b50..653d50c9ba 100644
+--- a/hw/riscv/meson.build
++++ b/hw/riscv/meson.build
+@@ -3,6 +3,7 @@ riscv_ss.add(files('boot.c'))
+ riscv_ss.add(when: 'CONFIG_RISCV_NUMA', if_true: files('numa.c'))
+ riscv_ss.add(files('riscv_hart.c'))
+ riscv_ss.add(when: 'CONFIG_IBEXDEMO', if_true: files('ibexdemo.c'))
++riscv_ss.add(when: 'CONFIG_IBEXDEMO', if_true: files('ibexdemo_soc_cosim.c'))
+ riscv_ss.add(when: 'CONFIG_OPENTITAN', if_true: files('opentitan.c'))
+ riscv_ss.add(when: 'CONFIG_IBEX_CLOCK_SRC', if_true: files('ibex_clock_src.c'))
+ riscv_ss.add(when: 'CONFIG_IBEX_COMMON', if_true: files('ibex_common.c'))

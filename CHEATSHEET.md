@@ -1,50 +1,71 @@
-# Ibex virtual platform — cheat sheet
+# Ibex demo commands (prepared Apple Silicon workspace)
 
-Copy-paste in a terminal (`~/Ibex_verilator` = repo root).
-
-## Environment (every new shell)
+From the repository root, in every terminal:
 
 ```bash
-export ROOT="$HOME/Ibex_verilator"
-export PATH="$ROOT/verilator/bin:$ROOT/toolchain/bin:$ROOT/local/bin:$HOME/.local/bin:$PATH"
-export LD_LIBRARY_PATH="$ROOT/local/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-ELF="$ROOT/ibex-demo-system/sw/c/build/demo/hello_world/demo"
+source ./env.sh
 ```
 
-## Try it (after builds)
+## Full-SoC QEMU + Verilator (main demo)
 
 ```bash
-# 1) Fast QEMU (~seconds)
-timeout 10 "$ROOT/qemu/build/qemu-system-riscv32" -M ibexdemo -nographic -kernel "$ELF"
+./ibex-vp-cosim/run_cosim.sh
+```
 
-# 2) Full RTL Verilator (UART in uart0.log; wait up to ~60s)
+Expected: `Hello World!` lines from the RTL CPU. Type `Z` to show the firmware
+echoing UART input. Exit with **Ctrl+A, then X**; the launcher cleans up both
+processes and the socket. The printed log directory contains `uart0.log` and
+`verilator.log`.
+
+To rebuild or verify:
+
+```bash
+./ibex-vp-cosim/build_full_soc.sh
+python3 ibex-vp-cosim/scripts/test_full_soc.py
+```
+
+## QEMU only
+
+```bash
+"$QEMU" -M ibexdemo -nographic -kernel "$ELF"
+```
+
+Expected: `Hello World!` lines. Exit with **Ctrl+A, then X**.
+
+## QEMU + Verilator GPIO
+
+Terminal A:
+
+```bash
+"$ROOT/ibex-vp-cosim/build/Vcosim_gpio_server" --socket /tmp/ibexdemo-cosim.sock
+```
+
+Terminal B, after sourcing `env.sh`:
+
+```bash
+python3 "$ROOT/ibex-vp-cosim/scripts/test_gpio_client.py"
+"$QEMU" -M ibexdemo-cosim -nographic -kernel "$ELF"
+```
+
+Expected: `GPIO OUT readback: 0x0000beef`, then `Hello World!` lines.
+QEMU runs the CPU; Verilator handles GPIO. Exit QEMU with Ctrl+A, then X.
+Stop the server with Ctrl+C; if blocked in a socket call, use Ctrl+\ in Terminal A.
+
+## Standalone full-SoC Verilator
+
+```bash
 cd "$ROOT/ibex-demo-system/build/lowrisc_ibex_demo_system_0/sim-verilator"
-timeout 60 ./Vtop_verilator --meminit=ram,"$ELF"; cat uart0.log
-
-# 3) Cycle-accurate cosim (UART on console; first line ~30–60s)
-"$ROOT/ibex-vp-cosim/run_cosim.sh"
+./Vtop_verilator --meminit=ram,"$ELF"
 ```
 
-**Good output:** `Hello World! 00000001   Input Value: 00000000` (timer hex counts up; GPIO often `00000000`).
-
-## Build (once)
+In another terminal:
 
 ```bash
-# Firmware
-cd "$ROOT/ibex-demo-system/sw/c/build" && cmake .. && make demo
-
-# QEMU
-cd "$ROOT/qemu/build" && ninja qemu-system-riscv32
-
-# Vtop_verilator (needs verilator on PATH)
-cd "$ROOT/ibex-demo-system"
-fusesoc --cores-root=. run --target=sim --tool=verilator --setup --build lowrisc:ibex:demo_system
+tail -F "$ROOT/ibex-demo-system/build/lowrisc_ibex_demo_system_0/sim-verilator/uart0.log"
 ```
 
-Full steps: [README.md](README.md).
+Expected: `Hello World!` in `uart0.log`. Stop with Ctrl+C.
+All four modes were verified on this Mac. The full-SoC machine is
+`ibexdemo-soc-cosim`; the GPIO-only machine is `ibexdemo-cosim`.
 
-## Suggested GitHub repo description
-
-```text
-Ibex Demo virtual platform: QEMU ibexdemo, FuseSoC Verilator SoC, and cycle-accurate cosim (run_cosim.sh). See README.md / CHEATSHEET.md.
-```
+Build notes: [LOCAL_SETUP.md](LOCAL_SETUP.md). Full guide: [README.md](README.md).

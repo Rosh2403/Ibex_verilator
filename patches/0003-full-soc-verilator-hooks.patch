@@ -1,0 +1,107 @@
+diff --git a/dv/verilator/ibex_demo_system_main.cc b/dv/verilator/ibex_demo_system_main.cc
+index 0024461..d49b136 100644
+--- a/dv/verilator/ibex_demo_system_main.cc
++++ b/dv/verilator/ibex_demo_system_main.cc
+@@ -3,11 +3,19 @@
+ // SPDX-License-Identifier: Apache-2.0
+ 
+ #include "ibex_demo_system.h"
++#include "soc_cosim.h"
+ 
+ int main(int argc, char **argv) {
++  SocCosim cosim;
++  VerilatorSimCtrl::GetInstance().RegisterExtension(&cosim);
+   DemoSystem demo_system(
+       "TOP.top_verilator.u_ibex_demo_system.u_ram.u_ram.gen_generic.u_impl_generic",
+       1024 * 1024);
+ 
+-  return demo_system.Main(argc, argv);
++  try {
++    return demo_system.Main(argc, argv);
++  } catch (const std::exception &error) {
++    std::cerr << "Full-SoC cosim: " << error.what() << std::endl;
++    return 1;
++  }
+ }
+diff --git a/ibex_demo_system.core b/ibex_demo_system.core
+index 61e633a..4901729 100644
+--- a/ibex_demo_system.core
++++ b/ibex_demo_system.core
+@@ -88,6 +88,8 @@ filesets:
+       - dv/verilator/ibex_demo_system.cc: { file_type: cppSource }
+       - dv/verilator/ibex_demo_system.h:  { file_type: cppSource, is_include_file: true}
+       - dv/verilator/ibex_demo_system_main.cc: { file_type: cppSource }
++      - dv/verilator/soc_cosim.h: { file_type: cppSource, is_include_file: true }
++      - dv/verilator/cosim_soc_protocol.h: { file_type: cppSource, is_include_file: true }
+       - dv/verilator/demo_system_verilator_lint.vlt:  { file_type: vlt }
+ 
+   files_constraints:
+@@ -292,6 +294,7 @@ targets:
+           - '-CFLAGS "-std=c++14 -Wall -DVM_TRACE_FMT_FST -DTOPLEVEL_NAME=top_verilator"'
+           - '-LDFLAGS "-pthread -lutil -lelf"'
+           - "-Wall"
++          - "-Wno-UNOPTFLAT"
+           - "-Wwarn-IMPERFECTSCH"
+           # RAM primitives wider than 64bit (required for ECC) fail to build in
+           # Verilator without increasing the unroll count (see Verilator#1266)
+diff --git a/vendor/lowrisc_ip/dv/dpi/uartdpi/uartdpi.c b/vendor/lowrisc_ip/dv/dpi/uartdpi/uartdpi.c
+index 1c9ebf3..e30ca93 100644
+--- a/vendor/lowrisc_ip/dv/dpi/uartdpi/uartdpi.c
++++ b/vendor/lowrisc_ip/dv/dpi/uartdpi/uartdpi.c
+@@ -19,6 +19,15 @@
+ #include <string.h>
+ #include <unistd.h>
+ 
++static void (*cosim_write_byte)(unsigned char);
++static int (*cosim_read_byte)(void);
++
++void uartdpi_set_cosim_callbacks(void (*write_byte)(unsigned char),
++                                  int (*read_byte)(void)) {
++  cosim_write_byte = write_byte;
++  cosim_read_byte = read_byte;
++}
++
+ // This keeps the necessary uart state.
+ struct uartdpi_ctx {
+   char ptyname[64];
+@@ -113,6 +122,12 @@ int uartdpi_can_read(void *ctx_void) {
+   if (ctx == NULL) {
+     return 0;
+   }
++  if (cosim_read_byte) {
++    int byte = cosim_read_byte();
++    if (byte < 0) return 0;
++    ctx->tmp_read = (char)byte;
++    return 1;
++  }
+   int rv = read(ctx->host, &ctx->tmp_read, 1);
+   return (rv == 1);
+ }
+@@ -130,8 +145,12 @@ void uartdpi_write(void *ctx_void, char c) {
+     return;
+   }
+ 
+-  rv = write(ctx->host, &c, 1);
+-  assert(rv == 1 && "Write to pseudo-terminal failed.");
++  if (cosim_write_byte) {
++    cosim_write_byte((unsigned char)c);
++  } else {
++    rv = write(ctx->host, &c, 1);
++    assert(rv == 1 && "Write to pseudo-terminal failed.");
++  }
+ 
+   if (ctx->log_file) {
+     rv = fwrite(&c, sizeof(char), 1, ctx->log_file);
+diff --git a/vendor/lowrisc_ip/dv/dpi/uartdpi/uartdpi.h b/vendor/lowrisc_ip/dv/dpi/uartdpi/uartdpi.h
+index 6383407..2a69abf 100644
+--- a/vendor/lowrisc_ip/dv/dpi/uartdpi/uartdpi.h
++++ b/vendor/lowrisc_ip/dv/dpi/uartdpi/uartdpi.h
+@@ -14,6 +14,8 @@ void uartdpi_close(void *ctx_void);
+ int uartdpi_can_read(void *ctx_void);
+ char uartdpi_read(void *ctx_void);
+ void uartdpi_write(void *ctx_void, char c);
++void uartdpi_set_cosim_callbacks(void (*write_byte)(unsigned char),
++                                  int (*read_byte)(void));
+ 
+ #ifdef __cplusplus
+ }  // extern "C"

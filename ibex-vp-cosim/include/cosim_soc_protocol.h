@@ -20,6 +20,9 @@
 #define COSIM_SOC_CMD_STEP 1u
 #define COSIM_SOC_CMD_SHUTDOWN 2u
 #define COSIM_SOC_CMD_UART_RX 3u
+#define COSIM_SOC_CMD_PING 4u
+#define COSIM_SOC_VERSION 1u
+#define COSIM_SOC_MAX_STEP 1000000u
 
 #define COSIM_SOC_MAX_UART_CHUNK 512u
 
@@ -38,5 +41,22 @@ typedef struct COSIM_SOC_PACKED CosimSocResp {
 
 /* flags */
 #define COSIM_SOC_FLAG_STOPPED 0x01u
+#define COSIM_SOC_FLAG_ERROR 0x02u
+
+static inline uint32_t cosim_soc_le32(uint32_t value) {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    return __builtin_bswap32(value);
+#else
+    return value;
+#endif
+}
+
+static inline uint64_t cosim_soc_le64(uint64_t value) {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    return __builtin_bswap64(value);
+#else
+    return value;
+#endif
+}
 
 #endif
