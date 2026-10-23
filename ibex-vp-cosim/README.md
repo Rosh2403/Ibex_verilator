@@ -2,11 +2,12 @@
 
 ```bash
 source ./env.sh
-./ibex-vp-cosim/build_full_soc.sh
+./ibex-vp-cosim/build_periph_cosim.sh
 ./ibex-vp-cosim/run_cosim.sh
 ```
 
-Run those commands from the repository root. The full guide is in [README.md](../README.md).
+Default simulator is QEMU TCG + Verilator GPIO/UART/timer. Full-SoC RTL is
+`run_full_soc.sh`. Matrix multiply: `run_matmul.sh`. See [README.md](../README.md).
 
 ## Execution and UART
 

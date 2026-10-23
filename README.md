@@ -1,21 +1,37 @@
 # Ibex Demo System: QEMU + Verilator
 
-Run the full Ibex Demo System RTL in Verilator and use QEMU as its UART console.
-The Ibex CPU, RAM, GPIO, timer, UART, PWM, and other peripherals execute in the
-RTL model. QEMU's `ibexdemo-soc-cosim` machine requests clock cycles and relays UART
-bytes over a Unix socket; it instantiates **no emulated CPU**.
+The default simulator is **QEMU TCG for the Ibex CPU** with **GPIO, UART, and
+timer in Verilator RTL** (`ibexdemo-cosim`). Full-SoC RTL (CPU in Verilator) remains
+available as `run_full_soc.sh`.
 
 The source trees, native tools, firmware, and simulator binaries are already
 installed and built in this Apple Silicon workspace. For another checkout, see
 the dependency and build instructions below.
 
-## Run the full-SoC demo
+## Run the default simulator (TCG CPU + RTL peripherals)
 
 From the repository root:
 
 ```bash
 source ./env.sh
+./ibex-vp-cosim/build_periph_cosim.sh
 ./ibex-vp-cosim/run_cosim.sh
+```
+
+Matrix multiply and cycle print:
+
+```bash
+./ibex-vp-cosim/run_matmul.sh
+```
+
+`mcycle` on the TCG path is QEMU's counter. The same script then runs the ELF on
+standalone Verilator so you can compare **Ibex RTL `mcycle`**.
+
+## Full-SoC RTL (CPU in Verilator)
+
+```bash
+source ./env.sh
+./ibex-vp-cosim/run_full_soc.sh
 ```
 
 The launcher starts Verilator, loads the hello-world ELF into RTL RAM, waits for
@@ -45,9 +61,9 @@ and is not synchronized to wall-clock time.
 Use a different firmware ELF, a custom socket, or additional QEMU arguments:
 
 ```bash
-./ibex-vp-cosim/run_cosim.sh /absolute/path/to/firmware.elf
-IBEXDEMO_COSIM_SOCKET=/tmp/my-ibex-soc.sock ./ibex-vp-cosim/run_cosim.sh
-./ibex-vp-cosim/run_cosim.sh "$ELF" -S
+./ibex-vp-cosim/run_full_soc.sh /absolute/path/to/firmware.elf
+IBEXDEMO_COSIM_SOCKET=/tmp/my-ibex-soc.sock ./ibex-vp-cosim/run_full_soc.sh
+./ibex-vp-cosim/run_full_soc.sh "$ELF" -S
 ```
 
 With `-S`, press Ctrl+A, C to open the QEMU monitor and enter `cont`; switch back
