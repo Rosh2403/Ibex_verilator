@@ -132,29 +132,22 @@ cd "$ROOT/ibex-demo-system/build/lowrisc_ibex_demo_system_0/sim-verilator"
 
 Read `uart0.log` from another terminal and stop with Ctrl+C.
 
-### QEMU CPU + Verilator GPIO
+### QEMU TCG CPU + Verilator GPIO/UART/timer
 
-The older `ibexdemo-cosim` machine simulates only GPIO in RTL. It remains available
-for peripheral experiments and uses a different socket protocol.
-
-Terminal A:
+QEMU's TCG CPU executes firmware. GPIO, UART, and timer MMIO, plus those IRQs
+and UART bytes, go to Verilator RTL (`ibexdemo-cosim`).
 
 ```bash
 source ./env.sh
-make -C "$ROOT/ibex-vp-cosim"
-"$ROOT/ibex-vp-cosim/build/Vcosim_gpio_server" --socket /tmp/ibexdemo-cosim.sock
+./ibex-vp-cosim/build_periph_cosim.sh
+./ibex-vp-cosim/run_periph_cosim.sh
 ```
 
-Terminal B:
+Expected: `Hello World!` from the RTL UART, with the timer tick in Verilator
+waking the TCG CPU from `wfi`. This is distinct from full-SoC `ibexdemo-soc-cosim`,
+where Verilator also runs the Ibex core.
 
-```bash
-source ./env.sh
-python3 "$ROOT/ibex-vp-cosim/scripts/test_gpio_client.py"
-"$QEMU" -M ibexdemo-cosim -nographic -kernel "$ELF"
-```
-
-The GPIO smoke test should print `GPIO OUT readback: 0x0000beef`. This GPIO bridge
-is distinct from the full-SoC machine `ibexdemo-soc-cosim`.
+The GPIO-only server `Vcosim_gpio_server` remains for `scripts/test_gpio_client.py`.
 
 ## Verification
 

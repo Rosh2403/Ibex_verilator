@@ -1,0 +1,143 @@
+diff --git a/hw/ibexdemo/Kconfig b/hw/ibexdemo/Kconfig
+index 26eaec0..9c2d269 100644
+--- a/hw/ibexdemo/Kconfig
++++ b/hw/ibexdemo/Kconfig
+@@ -18,3 +18,9 @@ config IBEXDEMO_UART
+ 
+ config IBEXDEMO_COSIM_BRIDGE
+     bool
++
++config IBEXDEMO_PERIPH_BRIDGE
++    bool
++
++config IBEXDEMO_VERILATOR_IFACE
++    bool
+diff --git a/hw/ibexdemo/meson.build b/hw/ibexdemo/meson.build
+index 6c40fde..eceedda 100644
+--- a/hw/ibexdemo/meson.build
++++ b/hw/ibexdemo/meson.build
+@@ -6,3 +6,5 @@ system_ss.add(when: 'CONFIG_IBEXDEMO_SPI', if_true: files('ibexdemo_spi.c'))
+ system_ss.add(when: 'CONFIG_IBEXDEMO_TIMER', if_true: files('ibexdemo_timer.c'))
+ system_ss.add(when: 'CONFIG_IBEXDEMO_UART', if_true: files('ibexdemo_uart.c'))
+ system_ss.add(when: 'CONFIG_IBEXDEMO_COSIM_BRIDGE', if_true: files('ibexdemo_cosim_bridge.c'))
++system_ss.add(when: 'CONFIG_IBEXDEMO_PERIPH_BRIDGE', if_true: files('ibexdemo_periph_bridge.c'))
++system_ss.add(when: 'CONFIG_IBEXDEMO_VERILATOR_IFACE', if_true: files('ibexdemo_verilator_iface.c'))
+diff --git a/hw/riscv/Kconfig b/hw/riscv/Kconfig
+index 8580d6e..0aed6b6 100644
+--- a/hw/riscv/Kconfig
++++ b/hw/riscv/Kconfig
+@@ -125,6 +125,8 @@ config IBEXDEMO
+     select IBEX_CLOCK_SRC
+     select IBEX_COMMON
+     select IBEXDEMO_COSIM_BRIDGE
++    select IBEXDEMO_PERIPH_BRIDGE
++    select IBEXDEMO_VERILATOR_IFACE
+     select IBEXDEMO_GPIO
+     select IBEXDEMO_SIMCTRL
+     select IBEXDEMO_SPI
+diff --git a/hw/riscv/ibexdemo.c b/hw/riscv/ibexdemo.c
+index d21335d..b6a946d 100644
+--- a/hw/riscv/ibexdemo.c
++++ b/hw/riscv/ibexdemo.c
+@@ -26,6 +26,9 @@
+ #include "hw/boards.h"
+ #include "hw/display/st7735.h"
+ #include "hw/ibexdemo/ibexdemo_cosim_bridge.h"
++#include "hw/ibexdemo/ibexdemo_periph_bridge.h"
++#include "hw/ibexdemo/cosim_soc_protocol.h"
++#include "hw/ibexdemo/ibexdemo_verilator_iface.h"
+ #include "hw/ibexdemo/ibexdemo_gpio.h"
+ #include "hw/ibexdemo/ibexdemo_simctrl.h"
+ #include "hw/ibexdemo/ibexdemo_spi.h"
+@@ -59,6 +62,8 @@ static void ibexdemo_soc_tap_ctrl_configure(
+     DeviceState *dev, const IbexDeviceDef *def, DeviceState *parent);
+ static void ibexdemo_soc_uart_configure(
+     DeviceState *dev, const IbexDeviceDef *def, DeviceState *parent);
++static void ibexdemo_soc_periph_configure(
++    DeviceState *dev, const IbexDeviceDef *def, DeviceState *parent);
+ 
+ /* ------------------------------------------------------------------------ */
+ /* Constants */
+@@ -328,31 +333,14 @@ static const IbexDeviceDef ibexdemo_cosim_soc_devices[] = {
+         ),
+     },
+     [IBEXDEMO_SOC_DEV_GPIO] = {
+-        .type = TYPE_IBEXDEMO_COSIM_BRIDGE,
++        .type = TYPE_IBEXDEMO_PERIPH_BRIDGE,
++        .cfg = &ibexdemo_soc_periph_configure,
+         .memmap = MEMMAPENTRIES(
+             { .base = 0x80000000u }
+         ),
+-        .prop = IBEXDEVICEPROPDEFS(
+-            IBEX_DEV_STRING_PROP("socket-path", "/tmp/ibexdemo-cosim.sock")
+-        ),
+-    },
+-    [IBEXDEMO_SOC_DEV_UART] = {
+-        .type = TYPE_IBEXDEMO_UART,
+-        .cfg = &ibexdemo_soc_uart_configure,
+-        .memmap = MEMMAPENTRIES(
+-            { .base = 0x80001000u }
+-        ),
+-        .gpio = IBEXGPIOCONNDEFS(
+-            IBEX_GPIO_SYSBUS_IRQ(0, IBEXDEMO_SOC_DEV_HART, 16)
+-        ),
+-    },
+-    [IBEXDEMO_SOC_DEV_TIMER] = {
+-        .type = TYPE_IBEXDEMO_TIMER,
+-        .memmap = MEMMAPENTRIES(
+-            { .base = 0x80002000u }
+-        ),
+         .gpio = IBEXGPIOCONNDEFS(
+-            IBEX_GPIO_SYSBUS_IRQ(0, IBEXDEMO_SOC_DEV_HART, IRQ_M_TIMER)
++            IBEX_GPIO_SYSBUS_IRQ(0, IBEXDEMO_SOC_DEV_HART, IRQ_M_TIMER),
++            IBEX_GPIO_SYSBUS_IRQ(1, IBEXDEMO_SOC_DEV_HART, 16)
+         ),
+     },
+     [IBEXDEMO_SOC_DEV_PWM] = {
+@@ -372,6 +360,8 @@ static const IbexDeviceDef ibexdemo_cosim_soc_devices[] = {
+             { .base = 0x80004000u }
+         ),
+     },
++    [IBEXDEMO_SOC_DEV_TIMER] = { 0 },
++    [IBEXDEMO_SOC_DEV_UART] = { 0 },
+     /* clang-format on */
+ };
+ 
+@@ -484,6 +474,19 @@ static void ibexdemo_soc_uart_configure(
+     qdev_prop_set_chr(dev, "chardev", serial_hd(def->instance));
+ }
+ 
++static void ibexdemo_soc_periph_configure(
++    DeviceState *dev, const IbexDeviceDef *def, DeviceState *parent)
++{
++    const char *path = getenv("IBEXDEMO_COSIM_SOCKET");
++
++    (void)def;
++    (void)parent;
++    if (path && path[0]) {
++        qdev_prop_set_string(dev, "socket-path", path);
++    }
++    qdev_prop_set_chr(dev, "chardev", serial_hd(0));
++}
++
+ /* ------------------------------------------------------------------------ */
+ /* SoC */
+ /* ------------------------------------------------------------------------ */
+@@ -686,7 +689,7 @@ static void ibexdemo_machine_register_types(void)
+ type_init(ibexdemo_machine_register_types);
+ 
+ /* ------------------------------------------------------------------------ */
+-/* Cosim machine (Verilator GPIO at 0x8000_0000) */
++/* Cosim machine (TCG CPU + Verilator GPIO/UART/timer) */
+ /* ------------------------------------------------------------------------ */
+ 
+ static void ibexdemo_cosim_machine_init(MachineState *state)
+@@ -702,7 +705,7 @@ static void ibexdemo_cosim_machine_class_init(ObjectClass *oc, const void *data)
+     MachineClass *mc = MACHINE_CLASS(oc);
+     (void)data;
+ 
+-    mc->desc = "IbexDemo with Verilator cosim GPIO (unix socket)";
++    mc->desc = "IbexDemo TCG CPU with Verilator GPIO, UART, and timer";
+     mc->init = ibexdemo_cosim_machine_init;
+     mc->max_cpus = 1u;
+     mc->default_cpu_type = ibexdemo_soc_devices[IBEXDEMO_SOC_DEV_HART].type;

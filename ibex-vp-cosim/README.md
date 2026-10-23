@@ -67,10 +67,17 @@ tracked `patches/` files. The builder applies patches idempotently and copies
 the maintained files into the external trees before rebuilding. Conflicting
 upstream edits cause patch application to stop with an error.
 
-## Legacy GPIO-only integration
+## TCG CPU + RTL peripherals
 
-`make -C ibex-vp-cosim` builds `Vcosim_gpio_server` for QEMU's older
-`ibexdemo-cosim` machine. Its protocol is `include/cosim_protocol.h` and its socket
-is `/tmp/ibexdemo-cosim.sock`. It is independent of full-SoC co-simulation.
+`ibexdemo-cosim` runs QEMU TCG as the CPU and Verilator as GPIO, UART, and timer:
 
-Extensions to that GPIO bridge: [docs/extend_pwm_irq.md](docs/extend_pwm_irq.md).
+```bash
+./ibex-vp-cosim/build_periph_cosim.sh
+./ibex-vp-cosim/run_periph_cosim.sh
+```
+
+`Vcosim_periph_server` uses `include/cosim_protocol.h` with `IDLE` / `UART_RX`
+commands and IRQ plus UART bytes in each response. The GPIO-only
+`Vcosim_gpio_server` remains for `scripts/test_gpio_client.py`.
+
+Extensions to the original GPIO-only bridge: [docs/extend_pwm_irq.md](docs/extend_pwm_irq.md).

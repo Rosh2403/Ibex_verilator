@@ -16,6 +16,9 @@ present, then copies the maintained bridge sources and builds both simulators:
   to the build. Its implementation is `ibex-vp-cosim/full_soc/ibexdemo_soc_cosim.c`.
 - `0003-full-soc-verilator-hooks.patch`: registers the simulation-controller
   extension, adds UART DPI callbacks and headers, and configures Verilator.
+- `0004-tcg-periph-cosim-qemu.patch`: QEMU `ibexdemo-cosim` TCG CPU with
+  Verilator GPIO, UART, and timer. Bridge sources are in
+  `ibex-vp-cosim/periph/` and are copied by `build_periph_cosim.sh`.
 
 Tested QEMU base: `d7655281a649abb339f5267f0b9e05329b3cee6d`.
 Tested Ibex Demo System base: `d37beb753e19482eb054aefac73a27289bf72e47`.

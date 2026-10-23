@@ -32,24 +32,15 @@ python3 ibex-vp-cosim/scripts/test_full_soc.py
 
 Expected: `Hello World!` lines. Exit with **Ctrl+A, then X**.
 
-## QEMU + Verilator GPIO
-
-Terminal A:
+## QEMU TCG CPU + Verilator GPIO/UART/timer
 
 ```bash
-"$ROOT/ibex-vp-cosim/build/Vcosim_gpio_server" --socket /tmp/ibexdemo-cosim.sock
+./ibex-vp-cosim/build_periph_cosim.sh
+./ibex-vp-cosim/run_periph_cosim.sh
 ```
 
-Terminal B, after sourcing `env.sh`:
-
-```bash
-python3 "$ROOT/ibex-vp-cosim/scripts/test_gpio_client.py"
-"$QEMU" -M ibexdemo-cosim -nographic -kernel "$ELF"
-```
-
-Expected: `GPIO OUT readback: 0x0000beef`, then `Hello World!` lines.
-QEMU runs the CPU; Verilator handles GPIO. Exit QEMU with Ctrl+A, then X.
-Stop the server with Ctrl+C; if blocked in a socket call, use Ctrl+\ in Terminal A.
+Expected: `Hello World!` lines. QEMU TCG executes firmware; GPIO, UART, and
+timer MMIO go to Verilator RTL. Exit with **Ctrl+A, then X**.
 
 ## Standalone full-SoC Verilator
 

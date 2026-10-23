@@ -9,8 +9,24 @@ apply_once() {
   if git -C "$tree" apply --reverse --check "$patch" 2>/dev/null; then
     return
   fi
+  if git -C "$tree" apply --check "$patch" 2>/dev/null; then
+    git -C "$tree" apply "$patch"
+    return
+  fi
+  if [[ "$(basename "$patch")" == "0001-"* ]] &&
+     [[ -f "$tree/hw/ibexdemo/ibexdemo_cosim_bridge.c" ]]; then
+    echo "Skipping $(basename "$patch") (GPIO cosim bridge already in tree)"
+    return
+  fi
+  if [[ "$(basename "$patch")" == "0003-"* ]] &&
+     [[ -f "$tree/dv/verilator/soc_cosim.h" ]] &&
+     grep -q uartdpi_set_cosim_callbacks "$tree/vendor/lowrisc_ip/dv/dpi/uartdpi/uartdpi.h" 2>/dev/null; then
+    echo "Skipping $(basename "$patch") (Verilator cosim hooks already in tree)"
+    return
+  fi
+  echo "Cannot apply $(basename "$patch") in $tree" >&2
   git -C "$tree" apply --check "$patch"
-  git -C "$tree" apply "$patch"
+  exit 1
 }
 
 copy_changed() {
