@@ -10,22 +10,43 @@ the dependency and build instructions below.
 
 ## Run the default simulator (TCG CPU + RTL peripherals)
 
-From the repository root:
+Run every command from the **repository root** (`~/Ibex_verilator`), not from
+`verilator/`:
 
 ```bash
+cd ~/Ibex_verilator
 source ./env.sh
 ./ibex-vp-cosim/build_periph_cosim.sh
 ./ibex-vp-cosim/run_cosim.sh
 ```
 
-Matrix multiply and cycle print:
+## Matrix multiply
+
+**Verilator (Ibex RTL cycles).** Use this to measure `mcycle`, executed cycles,
+and the performance-counter CSV. Stay in `~/Ibex_verilator` after `source ./env.sh`:
 
 ```bash
-./ibex-vp-cosim/run_matmul.sh
+./ibex-vp-cosim/run_matmul.sh        # 8x8 NxN GEMM, Ibex RTL mcycle
+./ibex-vp-cosim/run_matmul.sh 16     # other power-of-two N
+./ibex-vp-cosim/run_matmul_sweep.sh  # 8..256; writes sw/matmul/*.csv
 ```
 
-`mcycle` on the TCG path is QEMU's counter. The same script then runs the ELF on
-standalone Verilator so you can compare **Ibex RTL `mcycle`**.
+`run_matmul.sh` runs the ELF on standalone full-SoC Verilator. That `mcycle` is
+Ibex pipeline time. The default QEMU TCG + RTL-peripheral sim is a different
+path; TCG `mcycle` is QEMU's counter, not Ibex RTL.
+
+**TCG plugin (host GEMM, not RTL).** Use this to show a guest doorbell that
+offloads 4x4 matmul to the x86 host. It does not go through Verilator and is
+not cycle-accurate:
+
+```bash
+./ibex-vp-cosim/run_matmul_plugin.sh
+```
+
+Expected: `host 4x4 GEMM` and `PASS` with matching checksums (`0x3B8`).
+
+Rule of thumb: measure Ibex with Verilator (`run_matmul.sh`); prove the plugin
+hook with `run_matmul_plugin.sh`.
 
 ## Full-SoC RTL (CPU in Verilator)
 
