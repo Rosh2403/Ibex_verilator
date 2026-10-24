@@ -25,6 +25,16 @@ Expected: `Hello World!` lines. Exit with **Ctrl+A, then X**.
 That also runs the same ELF on standalone full-SoC Verilator for Ibex RTL
 cycle counts.
 
+## TCG plugin matmul (host GEMM, not RTL)
+
+```bash
+./ibex-vp-cosim/run_matmul_plugin.sh
+```
+
+QEMU TCG runs the Ibex firmware. A store to `0x0011C014` is intercepted by
+`tcg_plugin/matmul_plugin.so`, which multiplies guest `A` and `B` on the host
+and writes `C` back. Expected: plugin log plus `PASS`. This is not cycle-accurate.
+
 ## QEMU only
 
 ```bash

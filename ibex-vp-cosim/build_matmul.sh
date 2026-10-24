@@ -3,11 +3,12 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/env.sh"
+N="${1:-8}"
 SW="$ROOT/ibex-demo-system/sw/c"
-OUT="$SW/build/demo/matmul"
+OUT="$SW/build/demo/matmul/n${N}"
 CC="${CC:-riscv32-unknown-elf-gcc}"
 MARCH="-march=rv32imc -mabi=ilp32 -mcmodel=medany"
-CFLAGS="$MARCH -Wall -fvisibility=hidden -ffreestanding -O2"
+CFLAGS="$MARCH -Wall -fvisibility=hidden -ffreestanding -O2 -DN=${N}"
 ASFLAGS="$MARCH"
 LDFLAGS="-nostartfiles -T $SW/../common/link.ld"
 

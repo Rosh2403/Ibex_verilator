@@ -7,7 +7,8 @@ source ./env.sh
 ```
 
 Default simulator is QEMU TCG + Verilator GPIO/UART/timer. Full-SoC RTL is
-`run_full_soc.sh`. Matrix multiply: `run_matmul.sh`. See [README.md](../README.md).
+`run_full_soc.sh`. Ibex RTL matmul: `run_matmul.sh` / `run_matmul_sweep.sh`.
+Host 4x4 via TCG plugin: `run_matmul_plugin.sh`. See [README.md](../README.md).
 
 ## Execution and UART
 
