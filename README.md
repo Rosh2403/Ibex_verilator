@@ -1,52 +1,87 @@
 # Ibex Demo System: QEMU + Verilator
 
-The default simulator is **QEMU TCG for the Ibex CPU** with **GPIO, UART, and
-timer in Verilator RTL** (`ibexdemo-cosim`). Full-SoC RTL (CPU in Verilator) remains
-available as `run_full_soc.sh`.
-
-The source trees, native tools, firmware, and simulator binaries are already
-installed and built in this Apple Silicon workspace. For another checkout, see
-the dependency and build instructions below.
-
-## Run the default simulator (TCG CPU + RTL peripherals)
-
 Run every command from the **repository root** (`~/Ibex_verilator`), not from
 `verilator/`:
 
 ```bash
 cd ~/Ibex_verilator
 source ./env.sh
+```
+
+The source trees, native tools, firmware, and simulator binaries may already be
+built in a prepared workspace. For another checkout, see the dependency section
+below.
+
+## Default simulator (QEMU TCG CPU + Verilator peripherals)
+
+This is the **normal demo path** (`ibexdemo-cosim`):
+
+- **CPU and RAM:** QEMU TCG (fast functional Ibex).
+- **GPIO, UART, timer:** cycle-accurate Verilator RTL in `Vcosim_periph_server`.
+- **Link:** two processes on a **Unix socket** (`cosim_protocol.h`), not a single
+  linked binary.
+
+Build once, then launch:
+
+```bash
 ./ibex-vp-cosim/build_periph_cosim.sh
 ./ibex-vp-cosim/run_cosim.sh
 ```
 
-## Matrix multiply
+Expected: `Hello World!` on the UART console. Exit with **Ctrl+A, then X**.
 
-**Verilator (Ibex RTL cycles).** Use this to measure `mcycle`, executed cycles,
-and the performance-counter CSV. Stay in `~/Ibex_verilator` after `source ./env.sh`:
+QEMU TCG executes firmware; MMIO to `0x80000000` / `0x80001000` / `0x80002000`
+is forwarded to Verilator. Timer IRQs and UART bytes cross the socket. Guest
+`mcycle` on this path is **QEMU's counter**, not Ibex RTL pipeline time.
 
-```bash
-./ibex-vp-cosim/run_matmul.sh        # 8x8 NxN GEMM, Ibex RTL mcycle
-./ibex-vp-cosim/run_matmul.sh 16     # other power-of-two N
-./ibex-vp-cosim/run_matmul_sweep.sh  # 8..256; writes sw/matmul/*.csv
-```
+Equivalent launcher (same machine): `./ibex-vp-cosim/run_periph_cosim.sh`.
 
-`run_matmul.sh` runs the ELF on standalone full-SoC Verilator. That `mcycle` is
-Ibex pipeline time. The default QEMU TCG + RTL-peripheral sim is a different
-path; TCG `mcycle` is QEMU's counter, not Ibex RTL.
+Socket override: `IBEXDEMO_COSIM_SOCKET=/tmp/my.sock ./ibex-vp-cosim/run_cosim.sh`.
 
-**TCG plugin (host GEMM, not RTL).** Use this to show a guest doorbell that
-offloads 4x4 matmul to the x86 host. It does not go through Verilator and is
-not cycle-accurate:
+## TCG plugin matmul (host accelerator, no Verilator)
+
+A **QEMU TCG plugin** (`ibex-vp-cosim/tcg_plugin/matmul_plugin.so`) intercepts a
+guest store to doorbell **`0x0011C014`**. The plugin reads matrix pointers from a
+small RAM mailbox (`matmul_accel.h`), runs **4x4 integer GEMM on the host**, writes
+`C` back, and sets a done flag. Guest firmware is in `sw/matmul_accel/`.
+
+This is for **offload / hook demos**. It is not cycle-accurate and does not use
+Verilator. QEMU must be built with plugins (`build_matmul_plugin.sh` handles that
+when needed).
 
 ```bash
 ./ibex-vp-cosim/run_matmul_plugin.sh
 ```
 
-Expected: `host 4x4 GEMM` and `PASS` with matching checksums (`0x3B8`).
+Expected console:
 
-Rule of thumb: measure Ibex with Verilator (`run_matmul.sh`); prove the plugin
-hook with `run_matmul_plugin.sh`.
+```text
+[matmul plugin] loaded; kick store at 0x0011C014
+guest: kick host matmul
+[matmul plugin] host 4x4 GEMM  A@... B@... -> C@...
+guest: C sum 000003B8 expect 000003B8
+PASS
+```
+
+For a real MMIO accelerator (always present without `-plugin`), use a QEMU
+SysBus device (same idea as the peripheral bridge) or RTL in Verilator.
+
+## Matrix multiply on Ibex RTL (Verilator)
+
+Use this path to measure **Ibex `mcycle`**, executed cycles, and performance
+counter CSVs on the **full SoC** model (`Vtop_verilator`), not the default
+TCG+periph sim:
+
+```bash
+./ibex-vp-cosim/run_matmul.sh        # 8x8 NxN GEMM
+./ibex-vp-cosim/run_matmul.sh 16     # other power-of-two N
+./ibex-vp-cosim/run_matmul_sweep.sh  # N = 8..256; writes sw/matmul/*.csv
+```
+
+Firmware: `ibex-vp-cosim/sw/matmul/`. Results: `matmul_sweep.csv`, `matmul_pcount.csv`.
+
+**Rule of thumb:** Ibex cycle counts → `run_matmul.sh`. Plugin doorbell demo →
+`run_matmul_plugin.sh`.
 
 ## Full-SoC RTL (CPU in Verilator)
 
@@ -169,21 +204,6 @@ cd "$ROOT/ibex-demo-system/build/lowrisc_ibex_demo_system_0/sim-verilator"
 
 Read `uart0.log` from another terminal and stop with Ctrl+C.
 
-### QEMU TCG CPU + Verilator GPIO/UART/timer
-
-QEMU's TCG CPU executes firmware. GPIO, UART, and timer MMIO, plus those IRQs
-and UART bytes, go to Verilator RTL (`ibexdemo-cosim`).
-
-```bash
-source ./env.sh
-./ibex-vp-cosim/build_periph_cosim.sh
-./ibex-vp-cosim/run_periph_cosim.sh
-```
-
-Expected: `Hello World!` from the RTL UART, with the timer tick in Verilator
-waking the TCG CPU from `wfi`. This is distinct from full-SoC `ibexdemo-soc-cosim`,
-where Verilator also runs the Ibex core.
-
 The GPIO-only server `Vcosim_gpio_server` remains for `scripts/test_gpio_client.py`.
 
 ## Verification
@@ -221,7 +241,8 @@ They pass on the prepared Apple Silicon Mac. Build and test logs are in `deps/`.
 - `ibex-vp-cosim/include/cosim_soc_protocol.h`: versioned, little-endian socket protocol.
 - `patches/0003-full-soc-verilator-hooks.patch`: simulator registration and UART DPI hooks.
 - `ibex-vp-cosim/build_full_soc.sh`: patch application and simulator builds.
-- `ibex-vp-cosim/run_cosim.sh`: demo launch, console, and process cleanup.
+- `ibex-vp-cosim/run_cosim.sh`: default periph cosim launch (wraps `run_periph_cosim.sh`).
+- `ibex-vp-cosim/tcg_plugin/`: TCG matmul plugin and doorbell header.
 
 Protocol details: [ibex-vp-cosim/README.md](ibex-vp-cosim/README.md).
 Presentation commands: [CHEATSHEET.md](CHEATSHEET.md).
