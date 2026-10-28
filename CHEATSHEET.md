@@ -6,34 +6,53 @@ From the repository root, in every terminal:
 source ./env.sh
 ```
 
-## Default simulator: QEMU TCG CPU + Verilator GPIO/UART/timer
-
-```bash
-./ibex-vp-cosim/build_periph_cosim.sh
-./ibex-vp-cosim/run_cosim.sh
-```
-
-QEMU TCG executes firmware; GPIO, UART, and timer are Verilator RTL.
-Expected: `Hello World!` lines. Exit with **Ctrl+A, then X**.
-
-8x8 matrix multiply (prints `mcycle`):
-
-```bash
-./ibex-vp-cosim/run_matmul.sh
-```
-
-That also runs the same ELF on standalone full-SoC Verilator for Ibex RTL
-cycle counts.
-
-## TCG plugin matmul (host GEMM, not RTL)
+## Matmul accelerator daemon (QEMU TCG + plugin)
 
 ```bash
 ./ibex-vp-cosim/run_matmul_plugin.sh
 ```
 
-QEMU TCG runs the Ibex firmware. A store to `0x0011C014` is intercepted by
-`tcg_plugin/matmul_plugin.so`, which multiplies guest `A` and `B` on the host
-and writes `C` back. Expected: plugin log plus `PASS`. This is not cycle-accurate.
+QEMU TCG runs the Ibex firmware. A store to `0x0011C014` is caught by
+`build/matmul_plugin.so`, which sends `A` and `B` to the matmul accelerator
+daemon (a separate process on `/tmp/ibex-matmul-accel.sock`) and writes `C`
+back. Expected: four `ok checksum` lines, `rejected`, `PASS`, then the daemon's
+log and `Result: PASS`. Not cycle-accurate.
+
+Show the daemon in its own terminal:
+
+```bash
+./ibex-vp-cosim/matmul_daemon.sh foreground   # terminal A, Ctrl+C stops
+./ibex-vp-cosim/run_matmul_plugin.sh          # terminal B, repeat freely
+```
+
+Background daemon:
+
+```bash
+./ibex-vp-cosim/matmul_daemon.sh start        # detached
+./ibex-vp-cosim/matmul_daemon.sh status       # pid, GEMMs served
+./ibex-vp-cosim/matmul_daemon.sh log -f       # follow its log
+./ibex-vp-cosim/matmul_daemon.sh stop
+```
+
+Tests: `python3 ibex-vp-cosim/scripts/test_matmul_daemon.py` (19 tests).
+
+## Full-SoC QEMU + Verilator (RTL CPU)
+
+```bash
+./ibex-vp-cosim/run_full_soc.sh
+```
+
+Expected: `Hello World!` lines from the RTL CPU; type `Z` to see the UART echo.
+Exit with **Ctrl+A, then X**. Rebuild with `./ibex-vp-cosim/build_full_soc.sh`.
+Tests: `python3 ibex-vp-cosim/scripts/test_full_soc.py` (7 tests).
+
+## Matrix multiply on Ibex RTL (prints `mcycle`)
+
+```bash
+./ibex-vp-cosim/run_matmul.sh        # 8x8; pass 16, 32, ... for other sizes
+```
+
+Runs on standalone full-SoC Verilator for Ibex RTL cycle counts.
 
 ## QEMU only
 
@@ -42,13 +61,6 @@ and writes `C` back. Expected: plugin log plus `PASS`. This is not cycle-accurat
 ```
 
 Expected: `Hello World!` lines. Exit with **Ctrl+A, then X**.
-
-## Full-SoC QEMU + Verilator (RTL CPU)
-
-```bash
-./ibex-vp-cosim/build_full_soc.sh
-./ibex-vp-cosim/run_full_soc.sh
-```
 
 ## Standalone full-SoC Verilator
 
@@ -64,7 +76,22 @@ tail -F "$ROOT/ibex-demo-system/build/lowrisc_ibex_demo_system_0/sim-verilator/u
 ```
 
 Expected: `Hello World!` in `uart0.log`. Stop with Ctrl+C.
-The default machine is `ibexdemo-cosim` (TCG CPU + RTL peripherals).
-Full-SoC RTL is `ibexdemo-soc-cosim`.
+
+## QEMU TCG CPU + Verilator GPIO/UART/timer (not built on this Mac)
+
+```bash
+./ibex-vp-cosim/build_periph_cosim.sh
+./ibex-vp-cosim/run_cosim.sh
+```
+
+`patches/0004-tcg-periph-cosim-qemu.patch` does not yet apply to the installed
+QEMU tree, so this mode is not available here.
+
+## What is running?
+
+```bash
+./ibex-vp-cosim/matmul_daemon.sh status
+pgrep -fl 'matmul_daemon|Vtop_verilator|Vcosim_|qemu-system-riscv32'
+```
 
 Build notes: [LOCAL_SETUP.md](LOCAL_SETUP.md). Full guide: [README.md](README.md).

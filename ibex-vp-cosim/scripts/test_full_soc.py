@@ -208,7 +208,7 @@ class FullSocTests(unittest.TestCase):
             console = work / "launcher.log"
             with console.open("w") as output:
                 launcher = subprocess.Popen(
-                    ["bash", str(ROOT / "ibex-vp-cosim/run_cosim.sh")],
+                    ["bash", str(ROOT / "ibex-vp-cosim/run_full_soc.sh")],
                     cwd=ROOT, stdin=subprocess.PIPE, stdout=output, stderr=subprocess.STDOUT,
                 )
                 try:

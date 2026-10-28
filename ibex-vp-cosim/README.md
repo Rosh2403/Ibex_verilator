@@ -2,13 +2,19 @@
 
 ```bash
 source ./env.sh
-./ibex-vp-cosim/build_periph_cosim.sh
-./ibex-vp-cosim/run_cosim.sh
+./ibex-vp-cosim/run_full_soc.sh
 ```
 
-Default simulator is QEMU TCG + Verilator GPIO/UART/timer. Full-SoC RTL is
-`run_full_soc.sh`. Ibex RTL matmul: `run_matmul.sh` / `run_matmul_sweep.sh`.
-Host 4x4 via TCG plugin: `run_matmul_plugin.sh`. See [README.md](../README.md).
+This file describes the full-SoC RTL socket protocol. Other modes in this
+directory:
+
+- Matmul accelerator daemon behind a QEMU TCG plugin: `run_matmul_plugin.sh`,
+  `matmul_daemon.sh` ([docs/MATMUL_DAEMON.md](../docs/MATMUL_DAEMON.md)).
+- Ibex RTL matmul cycle counts: `run_matmul.sh` / `run_matmul_sweep.sh`.
+- QEMU TCG + Verilator GPIO/UART/timer: `run_cosim.sh` (not built on the
+  prepared Mac).
+
+The overview of every mode, process, and socket is in [README.md](../README.md).
 
 ## Execution and UART
 
