@@ -3,7 +3,7 @@
 The matmul accelerator is a host process, `matmul_daemon`, separate from QEMU.
 QEMU runs the Ibex firmware with TCG and loads `matmul_plugin.so`, a TCG plugin
 that turns a guest doorbell store into a request to the daemon. Demo commands
-are in the [README](../README.md#matmul-accelerator-daemon-qemu-tcg-plugin).
+are in the [README](../README.md#matmul-accelerator-daemon).
 For a guided code walkthrough, see [MATMUL_DEEP_DIVE.md](MATMUL_DEEP_DIVE.md).
 
 | Piece | Source | Built as |
