@@ -31,10 +31,12 @@ patch is needed, only QEMU built with plugin support.
 
 ## Quick start
 
-On a machine that is already set up, from the repository root:
+On a machine that is already set up. Every command in this README runs from the
+repository folder, so `cd` into it first in every new terminal:
 
 ```bash
-source ./env.sh                          # in every new terminal
+cd ~/Ibex_verilator                      # the folder you cloned into
+source ./env.sh
 ./ibex-vp-cosim/run_matmul_plugin.sh     # starts the NPU daemon, runs the VP; ends with "Result: PASS"
 ```
 
@@ -97,7 +99,7 @@ mkdir -p qemu/build
   --enable-plugins)
 ```
 
-**6. Build and run**
+**6. Build and run** (still inside `Ibex_verilator/`)
 
 ```bash
 ./ibex-vp-cosim/run_matmul_plugin.sh                  # first run builds QEMU; ends with "Result: PASS"
@@ -341,6 +343,9 @@ Each test uses its own socket, so the tests don't disturb a running daemon.
 
 ## Troubleshooting
 
+- **`./ibex-vp-cosim/…: No such file or directory`:** you're not in the
+  repository folder. Run `cd ~/Ibex_verilator` (or wherever you cloned it) and
+  `source ./env.sh`, then try again.
 - **`riscv32-unknown-elf-gcc: command not found`:** run `source ./env.sh`, and
   check that `toolchain/bin/` exists (step 3).
 - **`Invalid or unknown z ISA extension: 'zifencei'`:** handled automatically.
