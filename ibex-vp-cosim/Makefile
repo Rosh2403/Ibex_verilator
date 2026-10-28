@@ -61,6 +61,19 @@ else
 PLUGIN_LDFLAGS := -shared
 endif
 
+# RISC-V toolchains differ by age. Newer GCC/binutils (ISA spec 20191213) need
+# the zicsr/zifencei extension names for CSR and fence.i instructions; older
+# ones reject those names and include the instructions in plain rv32imc. Older
+# linkers also lack --no-warn-rwx-segments. Probe once, only when the firmware
+# is built. Override with `make RV_MARCH=...` if needed.
+rv_try = $(shell tmp=$$(mktemp) && \
+	printf 'void _start(void){}\n' | $(RV_CC) $(1) -mabi=ilp32 -nostdlib -x c -o $$tmp - \
+	>/dev/null 2>&1; rc=$$?; rm -f $$tmp; [ $$rc = 0 ] && echo ok)
+RV_MARCH ?= $(if $(call rv_try,-march=rv32imc_zicsr_zifencei),rv32imc_zicsr_zifencei,rv32imc)
+RV_LDNOWARN = $(if $(call rv_try,-march=$(RV_MARCH) -Wl$(comma)--no-warn-rwx-segments),\
+	-Wl$(comma)--no-warn-rwx-segments)
+comma := ,
+
 MATMUL_DAEMON := $(BUILD_DIR)/matmul_daemon
 MATMUL_PLUGIN := $(BUILD_DIR)/matmul_plugin.so
 MATMUL_FW     := $(BUILD_DIR)/matmul_accel.elf
@@ -82,8 +95,8 @@ $(MATMUL_PLUGIN): tcg_plugin/matmul_plugin.c tcg_plugin/matmul_accel.h \
 
 $(MATMUL_FW): $(FW_SRCS) tcg_plugin/matmul_accel.h $(LINK_LD)
 	mkdir -p $(BUILD_DIR)
-	$(RV_CC) -march=rv32imc_zicsr_zifencei -mabi=ilp32 -mcmodel=medany -O2 -Wall \
-		-ffreestanding -fvisibility=hidden -nostartfiles -Wl,--no-warn-rwx-segments -T $(LINK_LD) \
+	$(RV_CC) -march=$(RV_MARCH) -mabi=ilp32 -mcmodel=medany -O2 -Wall \
+		-ffreestanding -fvisibility=hidden -nostartfiles $(RV_LDNOWARN) -T $(LINK_LD) \
 		-I$(SW_COMMON) -Itcg_plugin -o $@ $(FW_SRCS)
 
 clean:
