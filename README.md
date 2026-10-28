@@ -31,8 +31,8 @@ patch is needed, only QEMU built with plugin support.
 
 ## Quick start
 
-On a machine that is already set up. Every command in this README runs from the
-repository folder, so `cd` into it first in every new terminal:
+Every command in this README runs from the repository folder. On a machine
+that is already set up, open a terminal and run:
 
 ```bash
 cd ~/Ibex_verilator                      # the folder you cloned into
