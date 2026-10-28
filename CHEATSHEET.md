@@ -34,7 +34,15 @@ Background daemon:
 ./ibex-vp-cosim/matmul_daemon.sh stop
 ```
 
-Tests: `python3 ibex-vp-cosim/scripts/test_matmul_daemon.py` (19 tests).
+Debug with GDB:
+
+```bash
+./ibex-vp-cosim/run_matmul_plugin.sh --gdb    # terminal A: VP paused, GDB port 1234
+riscv32-unknown-elf-gdb ibex-vp-cosim/build/matmul_accel.elf -ex 'target remote :1234'   # terminal B
+```
+
+Tests: `python3 ibex-vp-cosim/scripts/test_matmul_daemon.py` (22 tests).
+Benchmark vs direct (in-QEMU): `python3 ibex-vp-cosim/scripts/bench_npu.py`.
 
 ## Full-SoC QEMU + Verilator (RTL CPU)
 

@@ -23,7 +23,7 @@ VLTR_FLAGS += -Wno-PINCONNECTEMPTY -Wno-TIMESCALEMOD -Wno-BLKANDNBLK
 VLTR_FLAGS += -I$(IBEX_DEMO)/rtl/system -I$(PRIM_DIR)
 VLTR_FLAGS += -CFLAGS "-std=c++14 -I$(CURDIR)/include"
 
-.PHONY: all periph matmul matmul-daemon clean
+.PHONY: all periph matmul matmul-daemon matmul-bench clean
 
 all: $(BUILD_DIR)/Vcosim_gpio_server $(BUILD_DIR)/Vcosim_periph_server
 
@@ -80,24 +80,49 @@ MATMUL_FW     := $(BUILD_DIR)/matmul_accel.elf
 FW_SRCS := sw/matmul_accel/main.c $(SW_COMMON)/demo_system.c $(SW_COMMON)/uart.c \
 	$(SW_COMMON)/crt0.S
 
+MATMUL_PLUGIN_DIRECT := $(BUILD_DIR)/matmul_plugin_direct.so
+BENCH_SRCS := sw/npu_bench/main.c $(SW_COMMON)/demo_system.c $(SW_COMMON)/uart.c \
+	$(SW_COMMON)/crt0.S
+RV_FW_FLAGS = -march=$(RV_MARCH) -mabi=ilp32 -mcmodel=medany -O2 -g -Wall \
+	-ffreestanding -fvisibility=hidden -nostartfiles $(RV_LDNOWARN) -T $(LINK_LD) \
+	-I$(SW_COMMON) -Itcg_plugin
+
 matmul: $(MATMUL_DAEMON) $(MATMUL_PLUGIN) $(MATMUL_FW)
 matmul-daemon: $(MATMUL_DAEMON)
+# Benchmark-only: direct (in-QEMU) plugin baseline and benchmark firmware.
+matmul-bench: matmul $(MATMUL_PLUGIN_DIRECT) $(BUILD_DIR)/bench_npu.elf $(BUILD_DIR)/bench_io.elf
 
-$(MATMUL_DAEMON): matmul_daemon/matmul_daemon.c include/matmul_daemon_protocol.h
+$(MATMUL_DAEMON): matmul_daemon/matmul_daemon.c include/matmul_daemon_protocol.h \
+		include/matmul_gemm.h
 	mkdir -p $(BUILD_DIR)
 	$(HOST_CC) $(HOST_CFLAGS) -pthread -o $@ $<
 
 $(MATMUL_PLUGIN): tcg_plugin/matmul_plugin.c tcg_plugin/matmul_accel.h \
-		include/matmul_daemon_protocol.h $(QEMU_SRC)/include/qemu/qemu-plugin.h
+		include/matmul_daemon_protocol.h include/matmul_gemm.h \
+		$(QEMU_SRC)/include/qemu/qemu-plugin.h
 	mkdir -p $(BUILD_DIR)
 	$(HOST_CC) $(HOST_CFLAGS) -fPIC -fvisibility=hidden $(GLIB_CFLAGS) \
 		-I$(QEMU_SRC)/include/qemu -Itcg_plugin $(PLUGIN_LDFLAGS) -o $@ $< $(GLIB_LIBS)
 
+$(MATMUL_PLUGIN_DIRECT): tcg_plugin/matmul_plugin.c tcg_plugin/matmul_accel.h \
+		include/matmul_daemon_protocol.h include/matmul_gemm.h \
+		$(QEMU_SRC)/include/qemu/qemu-plugin.h
+	mkdir -p $(BUILD_DIR)
+	$(HOST_CC) $(HOST_CFLAGS) -DMATMUL_PLUGIN_DIRECT -fPIC -fvisibility=hidden \
+		$(GLIB_CFLAGS) -I$(QEMU_SRC)/include/qemu -Itcg_plugin $(PLUGIN_LDFLAGS) \
+		-o $@ $< $(GLIB_LIBS)
+
 $(MATMUL_FW): $(FW_SRCS) tcg_plugin/matmul_accel.h $(LINK_LD)
 	mkdir -p $(BUILD_DIR)
-	$(RV_CC) -march=$(RV_MARCH) -mabi=ilp32 -mcmodel=medany -O2 -Wall \
-		-ffreestanding -fvisibility=hidden -nostartfiles $(RV_LDNOWARN) -T $(LINK_LD) \
-		-I$(SW_COMMON) -Itcg_plugin -o $@ $(FW_SRCS)
+	$(RV_CC) $(RV_FW_FLAGS) -o $@ $(FW_SRCS)
+
+$(BUILD_DIR)/bench_npu.elf: $(BENCH_SRCS) tcg_plugin/matmul_accel.h $(LINK_LD)
+	mkdir -p $(BUILD_DIR)
+	$(RV_CC) $(RV_FW_FLAGS) -DBENCH_NPU -o $@ $(BENCH_SRCS)
+
+$(BUILD_DIR)/bench_io.elf: $(BENCH_SRCS) tcg_plugin/matmul_accel.h $(LINK_LD)
+	mkdir -p $(BUILD_DIR)
+	$(RV_CC) $(RV_FW_FLAGS) -o $@ $(BENCH_SRCS)
 
 clean:
 	rm -rf $(BUILD_DIR)

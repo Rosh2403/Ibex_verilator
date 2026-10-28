@@ -45,7 +45,8 @@ static void put_dec(uint32_t v) {
 }
 
 /* Kicks the accelerator and returns the final STATUS (IDLE = no response). */
-static uint32_t kick(uint32_t n) {
+/* noinline: keeps kick() and finish() as GDB breakpoint targets. */
+__attribute__((noinline)) static uint32_t kick(uint32_t n) {
   uint32_t status = MATMUL_ACCEL_IDLE;
   uint32_t i;
 
@@ -113,7 +114,7 @@ static uint32_t run_size(uint32_t n) {
   return errors;
 }
 
-static void finish(int pass) {
+__attribute__((noinline)) static void finish(int pass) {
   volatile uint32_t i;
 
   puts(pass ? "PASS\n" : "FAIL\n");

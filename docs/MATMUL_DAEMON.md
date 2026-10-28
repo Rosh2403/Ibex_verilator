@@ -3,7 +3,7 @@
 The matmul accelerator is a host process, `matmul_daemon`, separate from QEMU.
 QEMU runs the Ibex firmware with TCG and loads `matmul_plugin.so`, a TCG plugin
 that turns a guest doorbell store into a request to the daemon. Demo commands
-are in the [README](../README.md#matmul-accelerator-daemon).
+are in the [README](../README.md#running-the-npu-and-the-vp).
 For a guided code walkthrough, see [MATMUL_DEEP_DIVE.md](MATMUL_DEEP_DIVE.md).
 
 | Piece | Source | Built as |
@@ -87,7 +87,8 @@ because the byte stream can no longer be trusted.
 
 ## Plugin behavior and failure handling
 
-- Plugin arguments: `socket=PATH` and `timeout_ms=N` (default 5000), the deadline
+- Plugin arguments: `socket=PATH`, `log=kicks|summary` (per-request lines or
+  per-size timing at exit), and `timeout_ms=N` (default 5000), the deadline
   for sending a request and receiving its reply.
 - At load time the plugin connects and exchanges `HELLO`. If the daemon is not
   reachable, QEMU exits before the guest starts.
@@ -106,7 +107,7 @@ because the byte stream can no longer be trusted.
 python3 ibex-vp-cosim/scripts/test_matmul_daemon.py
 ```
 
-The 19 tests cover:
+The 22 tests cover:
 
 - Daemon lifecycle: detach, pidfile, socket permissions, SIGTERM cleanup,
   refusing a second daemon, stale-socket recovery, and never deleting a
@@ -119,6 +120,13 @@ The 19 tests cover:
   after a daemon restart while QEMU is paused, a daemon that never answers
   (guest error, no hang), and the launcher starting, reusing, and stopping
   daemons.
+- GDB: a debugging session through QEMU's GDB server with the plugin and daemon
+  attached (break in `kick()`, run the request, read STATUS and C, run to exit).
+- Benchmark baseline: the direct (in-QEMU) build gives the same results as the
+  daemon, and `log=summary` reports per-size timing.
+
+Performance against the direct (in-QEMU) build: `scripts/bench_npu.py`; results
+are in the [README](../README.md#performance).
 
 ## Limits
 

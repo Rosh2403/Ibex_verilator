@@ -7,6 +7,7 @@ Run from the repository root after `source ./env.sh`:
 import os
 from pathlib import Path
 import random
+import re
 import shutil
 import socket
 import stat
@@ -23,6 +24,7 @@ COSIM = ROOT / "ibex-vp-cosim"
 BUILD = COSIM / "build"
 DAEMON = BUILD / "matmul_daemon"
 PLUGIN = BUILD / "matmul_plugin.so"
+PLUGIN_DIRECT = BUILD / "matmul_plugin_direct.so"
 FIRMWARE = BUILD / "matmul_accel.elf"
 QEMU = ROOT / "qemu/build/qemu-system-riscv32"
 
@@ -146,6 +148,7 @@ class MatmulDaemonTests(unittest.TestCase):
     def setUpClass(cls):
         subprocess.run(["bash", COSIM / "build_matmul_plugin.sh"], check=True,
                        stdout=subprocess.DEVNULL)
+        subprocess.run(["make", "-s", "-C", COSIM, "matmul-bench"], check=True)
 
     def setUp(self):
         # Short /tmp path: Unix socket paths are limited to ~104 bytes on macOS.
@@ -401,6 +404,73 @@ class MatmulDaemonTests(unittest.TestCase):
         self.assertIn("accelerator error 3", proc.stdout)  # MATMUL_ACCEL_ERR_DAEMON_IO
         self.assertIn("no reply from daemon within 200 ms", proc.stderr)
         self.assertIn("FAIL", proc.stdout)
+
+    def test_summary_log_reports_per_size_timing(self):
+        self.daemon.start()
+        proc = subprocess.run(
+            [QEMU, "-M", "ibexdemo", "-nographic", "-kernel", FIRMWARE, "-plugin",
+             f"{PLUGIN},socket={self.daemon.socket},log=summary"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertNotIn("kick #1:", proc.stderr)  # no per-request lines
+        for n in (4, 8, 16, 32):
+            self.assertIn(f"timing [daemon] n={n}: 1 requests", proc.stderr)
+
+    def test_direct_baseline_plugin_matches_daemon_results(self):
+        """The benchmark baseline must compute the same results without a daemon."""
+        self.daemon.start()
+        daemon_run = self.run_qemu()
+        direct = subprocess.run(
+            [QEMU, "-M", "ibexdemo", "-nographic", "-kernel", FIRMWARE,
+             "-plugin", str(PLUGIN_DIRECT)],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        self.assertEqual(direct.returncode, 0, direct.stdout + direct.stderr)
+        self.assertIn("by plugin (direct)", direct.stderr)
+        checksums = lambda out: re.findall(r"checksum ([0-9A-F]{8})", out)
+        self.assertEqual(checksums(direct.stdout), checksums(daemon_run.stdout))
+        self.assertEqual(len(checksums(direct.stdout)), 4)
+
+    def test_gdb_debugs_guest_with_daemon_plugin(self):
+        """QEMU's GDB server works with the plugin loaded and the daemon attached."""
+        gdb = next((shutil.which(g) for g in
+                    ("riscv32-unknown-elf-gdb", "riscv-none-elf-gdb", "gdb-multiarch")
+                    if shutil.which(g)), None)
+        if not gdb:
+            self.skipTest("no RISC-V GDB found")
+        self.daemon.start()
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        qemu = subprocess.Popen(
+            [QEMU, "-M", "ibexdemo", "-display", "none", "-serial", "null", "-kernel",
+             FIRMWARE, "-plugin", f"{PLUGIN},socket={self.daemon.socket}",
+             "-gdb", f"tcp::{port}", "-S"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True)
+        try:
+            script = "\n".join([
+                "set pagination off", "set confirm off", f"target remote :{port}",
+                "break kick", "continue",
+                "print/x *(unsigned int *)0x0011C010",   # STATUS before the kick
+                "finish",                                # run the kick under GDB
+                "print/x *(unsigned int *)0x0011C010",   # STATUS after the kick
+                "delete", "break finish", "continue", "print pass", "continue", ""])
+            cmds = Path(self.dir) / "gdb.cmds"
+            cmds.write_text(script)
+            out = subprocess.run([gdb, "-q", "-batch", "-x", cmds, FIRMWARE],
+                                 capture_output=True, text=True, timeout=60).stdout
+            self.assertEqual(qemu.wait(timeout=30), 0, out)
+        finally:
+            if qemu.poll() is None:
+                qemu.kill()
+                qemu.wait()
+        self.assertIn("Breakpoint 1, kick (n=n@entry=4)", out)
+        self.assertRegex(out, r"\$\d+ = 0x0\n")              # IDLE before
+        self.assertRegex(out, r"Value returned is \$\d+ = 1")  # kick() saw DONE
+        self.assertRegex(out, r"\$\d+ = 0x1\n")              # DONE after
+        self.assertIn("finish (pass=pass@entry=1)", out)
+        self.assertIn("exited normally", out)
+        self.assertIn("GEMM 32x32", self.daemon.log.read_text())
 
     def test_launcher_starts_and_stops_its_daemon(self):
         env = dict(os.environ, IBEX_MATMUL_SOCKET=str(self.daemon.socket))

@@ -11,6 +11,13 @@
  *   socket=PATH       daemon socket (default $IBEX_MATMUL_SOCKET or
  *                     MMD_DEFAULT_SOCKET)
  *   timeout_ms=N      per-request send+reply timeout (default 5000)
+ *   log=kicks|summary one line per request (default), or only per-size
+ *                     timing totals at exit (for benchmarks)
+ *
+ * Built with -DMATMUL_PLUGIN_DIRECT, the same plugin computes the GEMM itself
+ * instead of calling the daemon. That build exists only as the "direct"
+ * baseline for ibex-vp-cosim/scripts/bench_npu.py: same instrumentation, same
+ * mailbox handling, same kernel (matmul_gemm.h); only where the math runs differs.
  *
  * QEMU refuses to start if the daemon is not reachable at load time. A later
  * transport failure is retried once on a fresh connection (a GEMM request has
@@ -37,9 +44,18 @@
 
 #include "matmul_accel.h"
 #include "matmul_daemon_protocol.h"
+#include "matmul_gemm.h"
 
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0 /* macOS: SO_NOSIGPIPE is set on the socket instead */
+#endif
+
+#ifdef MATMUL_PLUGIN_DIRECT
+/* The socket client code is unused in this benchmark-only build. */
+#pragma GCC diagnostic ignored "-Wunused-function"
+#define MODE_NAME "plugin (direct)"
+#else
+#define MODE_NAME "daemon"
 #endif
 
 _Static_assert(MATMUL_ACCEL_MAX_N <= MMD_MAX_N, "guest limit exceeds daemon limit");
@@ -55,7 +71,11 @@ static struct {
     int fd;
     uint32_t seq;
     uint64_t kicks, done, failed;
-} st = {.fd = -1, .timeout_ms = 5000};
+    bool log_kicks;
+    /* Time spent handling successful requests, by matrix size. */
+    uint64_t size_count[MATMUL_ACCEL_MAX_N + 1];
+    uint64_t size_ns[MATMUL_ACCEL_MAX_N + 1];
+} st = {.fd = -1, .timeout_ms = 5000, .log_kicks = true};
 
 static void log_line(const char *fmt, ...) G_GNUC_PRINTF(1, 2);
 
@@ -296,13 +316,13 @@ static void finish(uint32_t status, uint32_t errcode) {
 
 static void handle_kick(void) {
     static uint32_t ab[2 * MAX_ELEMS];
-    static uint8_t resp[sizeof(MmdGemmDone) + MAX_ELEMS * sizeof(uint32_t)];
+    static _Alignas(8) uint8_t resp[sizeof(MmdGemmDone) + MAX_ELEMS * sizeof(uint32_t)];
     uint32_t mbox[4];
     MmdGemmReq req;
     MmdGemmDone done;
     MmdHeader rh;
     uint32_t n, a_addr, b_addr, c_addr, bytes;
-    uint64_t t0;
+    uint64_t t0, t_kick = now_ns();
     bool sent = false;
 
     st.kicks++;
@@ -329,6 +349,19 @@ static void handle_kick(void) {
         return;
     }
 
+#ifdef MATMUL_PLUGIN_DIRECT
+    t0 = now_ns();
+    {
+        uint32_t *c = (uint32_t *)(resp + sizeof(MmdGemmDone));
+
+        mmd_gemm(n, ab, ab + n * n, c);
+        done = (MmdGemmDone){.n = n, .macs = (uint64_t)n * n * n};
+        done.compute_ns = now_ns() - t0;
+    }
+    (void)req;
+    (void)rh;
+    (void)sent;
+#else
     req = (MmdGemmReq){.n = mmd_le32(n)};
     t0 = now_ns();
     for (int attempt = 0; attempt < 2 && !sent; attempt++) {
@@ -361,17 +394,23 @@ static void handle_kick(void) {
         finish(MATMUL_ACCEL_ERROR, MATMUL_ACCEL_ERR_REJECTED);
         return;
     }
+#endif
     if (!guest_write(c_addr, resp + sizeof(done), bytes)) {
         log_line("kick #%" PRIu64 ": cannot write C@0x%08" PRIx32, st.kicks, c_addr);
         finish(MATMUL_ACCEL_ERROR, MATMUL_ACCEL_ERR_GUEST_MEM);
         return;
     }
     finish(MATMUL_ACCEL_DONE, MATMUL_ACCEL_ERR_NONE);
-    log_line("kick #%" PRIu64 ": %" PRIu32 "x%" PRIu32 " GEMM A@0x%08" PRIx32
-             " B@0x%08" PRIx32 " -> C@0x%08" PRIx32 " by daemon: %" PRIu64
-             " MACs, compute %.1f us, round trip %.1f us",
-             st.kicks, n, n, a_addr, b_addr, c_addr, mmd_le64(done.macs),
-             mmd_le64(done.compute_ns) / 1000.0, (now_ns() - t0) / 1000.0);
+    st.size_count[n]++;
+    st.size_ns[n] += now_ns() - t_kick;
+    if (st.log_kicks) {
+        log_line("kick #%" PRIu64 ": %" PRIu32 "x%" PRIu32 " GEMM A@0x%08" PRIx32
+                 " B@0x%08" PRIx32 " -> C@0x%08" PRIx32 " by %s: %" PRIu64
+                 " MACs, compute %.1f us, round trip %.1f us",
+                 st.kicks, n, n, a_addr, b_addr, c_addr, MODE_NAME,
+                 mmd_le64(done.macs), mmd_le64(done.compute_ns) / 1000.0,
+                 (now_ns() - t0) / 1000.0);
+    }
 }
 
 static void vcpu_mem_cb(unsigned int vcpu_index, qemu_plugin_meminfo_t info,
@@ -404,6 +443,13 @@ static void plugin_exit(qemu_plugin_id_t id, void *udata) {
     g_mutex_lock(&st.lock);
     log_line("exit: %" PRIu64 " kicks, %" PRIu64 " done, %" PRIu64 " failed", st.kicks,
              st.done, st.failed);
+    for (int n = 1; n <= MATMUL_ACCEL_MAX_N; n++) {
+        if (st.size_count[n]) {
+            log_line("timing [%s] n=%d: %" PRIu64 " requests, avg %.2f us per request",
+                     MODE_NAME, n, st.size_count[n],
+                     st.size_ns[n] / 1000.0 / (double)st.size_count[n]);
+        }
+    }
     disconnect();
     g_mutex_unlock(&st.lock);
 }
@@ -429,9 +475,13 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
                 fprintf(stderr, "[matmul plugin] bad timeout_ms=%s\n", kv[1]);
                 return -1;
             }
+        } else if (kv[0] && kv[1] && !strcmp(kv[0], "log") &&
+                   (!strcmp(kv[1], "kicks") || !strcmp(kv[1], "summary"))) {
+            st.log_kicks = !strcmp(kv[1], "kicks");
         } else {
             fprintf(stderr, "[matmul plugin] unknown argument '%s' "
-                            "(use socket=PATH, timeout_ms=N)\n", argv[i]);
+                            "(use socket=PATH, timeout_ms=N, log=kicks|summary)\n",
+                    argv[i]);
             return -1;
         }
     }
@@ -445,11 +495,13 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
     strcpy(st.socket_path, sock);
     g_mutex_init(&st.lock);
 
+#ifndef MATMUL_PLUGIN_DIRECT
     if (!connect_daemon()) {
         fprintf(stderr, "[matmul plugin] start it first: "
                         "ibex-vp-cosim/matmul_daemon.sh start\n");
         return -1;
     }
+#endif
     log_line("loaded; doorbell store at 0x%08x, mailbox at 0x%08x", MATMUL_ACCEL_KICK,
              MATMUL_ACCEL_BASE);
     qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans);

@@ -34,6 +34,7 @@
 #include <unistd.h>
 
 #include "matmul_daemon_protocol.h"
+#include "matmul_gemm.h"
 
 static volatile sig_atomic_t g_stop;
 static int g_wake_pipe[2] = {-1, -1};
@@ -131,19 +132,6 @@ static bool send_error(int fd, uint32_t seq, uint32_t code, uint32_t detail) {
     return send_msg(fd, MMD_MSG_ERROR, seq, &e, sizeof(e), NULL, 0);
 }
 
-/* C = A * B with RV32-style wrap-around. i-k-j order keeps B row-contiguous. */
-static void gemm(uint32_t n, const uint32_t *a, const uint32_t *b, uint32_t *c) {
-    memset(c, 0, (size_t)n * n * sizeof(*c));
-    for (uint32_t i = 0; i < n; i++) {
-        for (uint32_t k = 0; k < n; k++) {
-            uint32_t aik = a[i * n + k];
-            for (uint32_t j = 0; j < n; j++) {
-                c[i * n + j] += aik * b[k * n + j];
-            }
-        }
-    }
-}
-
 typedef struct Client {
     int fd;
     unsigned id;
@@ -186,7 +174,7 @@ static bool handle_gemm(Client *cl, uint32_t seq, uint8_t *payload, uint32_t len
     }
 
     t0 = now_ns();
-    gemm(n, a, b, c);
+    mmd_gemm(n, a, b, c);
     dt = now_ns() - t0;
 
     for (size_t i = 0; i < elems; i++) {
