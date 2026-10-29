@@ -3,6 +3,7 @@
 Presenter notes. Each section is roughly one slide or one talking point, and
 code references use `file:line` so you can open them live. Protocol reference
 and test list: [MATMUL_DAEMON.md](MATMUL_DAEMON.md).
+Matching slides: [Ibex_NPU_VP_Overview.pptx](Ibex_NPU_VP_Overview.pptx).
 
 ---
 

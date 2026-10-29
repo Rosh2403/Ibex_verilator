@@ -387,5 +387,7 @@ More documentation:
 
 - [docs/MATMUL_DAEMON.md](docs/MATMUL_DAEMON.md): protocol and failure handling.
 - [docs/MATMUL_DEEP_DIVE.md](docs/MATMUL_DEEP_DIVE.md): presenter notes for a code walkthrough.
+- [docs/Ibex_NPU_VP_Overview.pptx](docs/Ibex_NPU_VP_Overview.pptx): 24-slide overview
+  deck with speaker notes; opens in PowerPoint, or upload it to Google Slides.
 - [docs/OTHER_MODES.md](docs/OTHER_MODES.md): the repository's other simulation
   modes (full-SoC RTL in Verilator and others), which this NPU setup doesn't need.
