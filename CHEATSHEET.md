@@ -41,8 +41,14 @@ Debug with GDB:
 riscv32-unknown-elf-gdb ibex-vp-cosim/build/matmul_accel.elf -ex 'target remote :1234'   # terminal B
 ```
 
-Tests: `python3 ibex-vp-cosim/scripts/test_matmul_daemon.py` (22 tests).
-Benchmark vs direct (in-QEMU): `python3 ibex-vp-cosim/scripts/bench_npu.py`.
+Compare the daemon with the direct (in-QEMU) version:
+
+```bash
+python3 ibex-vp-cosim/scripts/bench_npu.py --npu-only   # time per request, split by phase
+./ibex-vp-cosim/run_matmul_plugin.sh --direct           # demo with the math inside QEMU
+```
+
+Tests: `python3 ibex-vp-cosim/scripts/test_matmul_daemon.py` (24 tests).
 
 ## Full-SoC QEMU + Verilator (RTL CPU)
 

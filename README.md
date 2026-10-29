@@ -103,7 +103,7 @@ mkdir -p qemu/build
 
 ```bash
 ./ibex-vp-cosim/run_matmul_plugin.sh                  # first run builds QEMU; ends with "Result: PASS"
-python3 ibex-vp-cosim/scripts/test_matmul_daemon.py   # expect: Ran 22 tests ... OK
+python3 ibex-vp-cosim/scripts/test_matmul_daemon.py   # expect: Ran 24 tests ... OK
 ```
 
 **macOS (Apple Silicon):** use the
@@ -141,7 +141,7 @@ rejected, and exits QEMU with 0 on PASS. Expected:
 ```text
 matmul daemon started: pid 55602, socket /tmp/ibex-matmul-accel.sock, log ...
 [matmul plugin] connected to daemon pid 55602 at /tmp/ibex-matmul-accel.sock ...
-guest: kick 4x4 ... [matmul plugin] kick #1: 4x4 GEMM ... by daemon: 64 MACs, ...
+guest: kick 4x4 ... [matmul plugin] kick #1: 4x4 GEMM by daemon: 39.2 us = read A,B 11.42 + socket 26.00 + ...
 ok  checksum FFFE8FC9
 ...
 guest: kick N=33 (expect rejection) ... [matmul plugin] kick #5: rejected N=33 ...
@@ -154,7 +154,8 @@ Result: PASS
 
 | Option | Effect |
 | --- | --- |
-| `--gdb` (first argument) | start the VP paused for GDB; see [Debugging with GDB](#debugging-with-gdb) |
+| `--gdb` | start the VP paused for GDB; see [Debugging with GDB](#debugging-with-gdb) |
+| `--direct` | same demo with the math inside QEMU and no daemon, to compare timings; see [Performance](#performance) |
 | extra arguments | passed to QEMU, e.g. `-d plugin` |
 | `KEEP_DAEMON=1` | leave a daemon the launcher started running |
 | `QEMU_TIMEOUT=N` | kill the VP after N seconds (default 60; 0 = never) |
@@ -200,7 +201,7 @@ $B/matmul_daemon --socket /tmp/ibex-matmul-accel.sock --ping     # query it
 | --- | --- |
 | `socket=PATH` | daemon socket (default `$IBEX_MATMUL_SOCKET` or `/tmp/ibex-matmul-accel.sock`) |
 | `timeout_ms=N` | deadline for sending each request and receiving its reply (default 5000) |
-| `log=kicks` / `log=summary` | one line per request (default), or per-size timing totals at exit |
+| `log=kicks` / `log=summary` | one timing line per request (default), or per-size averages at exit |
 
 How failures are handled:
 
@@ -243,42 +244,76 @@ waits. Ubuntu's `gdb-multiarch` also works if your toolchain has no GDB.
 
 ## Performance
 
+All times here are **host wall-clock time**: how long the computer running the
+simulation took. They are not Ibex clock cycles; NPU timing isn't modeled.
+
 The NPU daemon is compared with a **direct** implementation: the same plugin
 built with `-DMATMUL_PLUGIN_DIRECT`, which runs the GEMM inside QEMU. Both
 variants share the same instrumentation, mailbox handling, and GEMM kernel; only
-where the math runs differs. Reproduce with:
+where the math runs differs.
+
+### Show the difference
 
 ```bash
-python3 ibex-vp-cosim/scripts/bench_npu.py      # median of 5 runs each (--runs N)
+python3 ibex-vp-cosim/scripts/bench_npu.py --npu-only   # per-request breakdown, a few seconds
+python3 ibex-vp-cosim/scripts/bench_npu.py              # adds the I/O workload, about 2 minutes
+./ibex-vp-cosim/run_matmul_plugin.sh                    # demo through the daemon
+./ibex-vp-cosim/run_matmul_plugin.sh --direct           # same demo, math inside QEMU
 ```
 
-Results on an Apple M3 Pro, median of 7 runs:
+Both demos print one line per request, split into phases:
 
-**Guest I/O and CPU workload with no NPU requests** (2 s of firmware compute
-and UART output):
+```text
+kick #4: 32x32 GEMM by daemon: 21.8 us = read A,B 1.38 + socket 16.17 + compute 3.54 + write C 0.75
+kick #4: 32x32 GEMM by plugin (direct): 4.5 us = read A,B 0.79 + compute 3.21 + write C 0.46
+```
+
+| Phase | What it covers |
+| --- | --- |
+| read A,B | the plugin reading the mailbox, A, and B from guest memory |
+| socket | sending A and B to the daemon and receiving C, minus the daemon's compute time (daemon only) |
+| compute | C = A × B, timed where it runs: in the daemon, or in the plugin for direct |
+| write C | the plugin writing C, ERRCODE, and STATUS into guest memory |
+
+Single requests vary from run to run, and the first one is slower while caches
+warm up. The benchmark averages 2,000 requests per size.
+
+### Results
+
+Apple M3 Pro, median of 7 runs, with the modes interleaved run by run.
+
+**Time per NPU request** (µs, average of 2,000 requests per size):
+
+| Matrix | Mode | Total | Read A,B | Socket | Compute | Write C |
+| --- | --- | --- | --- | --- | --- | --- |
+| 4×4 | Direct | 0.50 | 0.21 | – | 0.03 | 0.25 |
+| 4×4 | Daemon | 11.09 | 0.31 | 10.18 | 0.04 | 0.54 |
+| 8×8 | Direct | 0.58 | 0.22 | – | 0.11 | 0.25 |
+| 8×8 | Daemon | 11.10 | 0.32 | 10.11 | 0.15 | 0.52 |
+| 16×16 | Direct | 1.05 | 0.26 | – | 0.51 | 0.28 |
+| 16×16 | Daemon | 11.70 | 0.38 | 10.11 | 0.66 | 0.54 |
+| 32×32 | Direct | 3.75 | 0.37 | – | 3.04 | 0.35 |
+| 32×32 | Daemon | 25.85 | 0.67 | 19.86 | 4.32 | 1.00 |
+
+Per request, the daemon adds about 10.5 µs for small matrices and 22 µs at
+32×32. The socket round trip is 90–96% of that difference. The other phases are
+the same work in both modes but run slightly slower in daemon mode, probably
+because the thread has just woken up from waiting on the socket. The VP waits
+for each request, so nothing hides this cost. Per request, the direct
+implementation is faster.
+
+**Guest I/O and CPU workload with no NPU requests** (about 2 s of firmware
+computation and UART output):
 
 | Configuration | Time | vs no plugin |
 | --- | --- | --- |
-| No plugin | 2.034 s | 1.00× |
-| Direct implementation | 2.075 s | 1.02× |
-| NPU daemon | 2.119 s | 1.04× |
+| No plugin | 2.130 s | 1.00× |
+| Direct implementation | 2.316 s | 1.09× |
+| NPU daemon | 2.321 s | 1.09× |
 
 Guest I/O and CPU performance are the same for the daemon and direct versions:
-both add 2–4% for watching guest stores, and the order between them changes
-from run to run.
-
-**Time per NPU request, as seen by the VP** (2,000 requests per size):
-
-| Matrix | Direct implementation | NPU daemon | Daemon overhead |
-| --- | --- | --- | --- |
-| 4×4 | 3.0 µs | 14.1 µs | +11.1 µs |
-| 8×8 | 3.0 µs | 14.2 µs | +11.1 µs |
-| 16×16 | 3.5 µs | 16.0 µs | +12.5 µs |
-| 32×32 | 6.3 µs | 27.0 µs | +20.6 µs |
-
-Each daemon request costs an extra 11–21 µs for the socket round trip and for
-copying the matrices between processes. The VP waits for each request, so the
-daemon can't hide that cost. Per request, the direct implementation is faster.
+the two are within 0.3% of each other. Both add about 9–11% over no plugin,
+because the plugin is called on every guest store to watch for the doorbell.
 
 The daemon is worth that cost when:
 
@@ -318,14 +353,17 @@ REG(MATMUL_ACCEL_KICK) = 1;                       /* C is ready after this store
 if (REG(MATMUL_ACCEL_STATUS) != MATMUL_ACCEL_DONE) { /* see ERRCODE */ }
 ```
 
-Firmware must end below `0x0011C000`. Full example:
+Firmware must end below `0x0011C000`. Keep A, B, and C in page-aligned
+buffers (`__attribute__((aligned(4096)))`). If C shares a 4 KiB page with code,
+every write of the result makes QEMU discard and retranslate that code. That
+costs 100–500 µs per request, far more than the request itself. Full example:
 `ibex-vp-cosim/sw/matmul_accel/main.c`. The socket protocol between plugin and
 daemon is in [docs/MATMUL_DAEMON.md](docs/MATMUL_DAEMON.md).
 
 ## Tests
 
 ```bash
-python3 ibex-vp-cosim/scripts/test_matmul_daemon.py    # 22 tests, about 5 s
+python3 ibex-vp-cosim/scripts/test_matmul_daemon.py    # 24 tests, about 6 s
 ```
 
 The tests cover:
@@ -336,8 +374,9 @@ The tests cover:
 - **VP end to end:** no daemon, no plugin, a daemon restart while running, and a
   hung daemon.
 - **GDB:** a debugging session against the VP with the daemon attached.
-- **Direct baseline:** produces the same results as the daemon.
-- **Scripts:** the launcher and control script.
+- **Direct baseline:** produces the same results as the daemon; the timing
+  breakdown and the quick benchmark work.
+- **Scripts:** the launcher (including `--direct`) and control script.
 
 Each test uses its own socket, so the tests don't disturb a running daemon.
 

@@ -2,7 +2,7 @@
 # Demo: QEMU TCG runs the Ibex firmware; the TCG plugin forwards each matmul
 # doorbell to the matmul accelerator daemon, a separate host process.
 #
-#   run_matmul_plugin.sh [--gdb] [extra QEMU args]
+#   run_matmul_plugin.sh [--direct] [--gdb] [extra QEMU args]
 #
 # Uses a running daemon if one answers on $IBEX_MATMUL_SOCKET; otherwise
 # starts one and stops it afterwards (KEEP_DAEMON=1 leaves it running).
@@ -11,6 +11,10 @@
 #
 # --gdb starts QEMU paused with its GDB server on $GDB_PORT (default 1234) and
 # no timeout; attach riscv32-unknown-elf-gdb from another terminal.
+#
+# --direct runs the same firmware with the benchmark-only direct plugin build,
+# which computes inside QEMU with no daemon, so its per-request timing lines
+# can be compared with a normal run.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,10 +26,14 @@ SOCK="$IBEX_MATMUL_SOCKET"
 LOG="$SOCK.log"
 
 use_gdb=0
-if [[ "${1:-}" == "--gdb" ]]; then
-  use_gdb=1
-  shift
-fi
+use_direct=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --gdb) use_gdb=1; shift ;;
+    --direct) use_direct=1; shift ;;
+    *) break ;;
+  esac
+done
 GDB_PORT="${GDB_PORT:-1234}"
 timeout_s="${QEMU_TIMEOUT:-60}"
 qemu_extra=()
@@ -39,6 +47,9 @@ for arg in "$@"; do
 done
 
 bash "$ROOT/ibex-vp-cosim/build_matmul_plugin.sh"
+if [[ "$use_direct" == 1 ]]; then
+  make -s -C "$ROOT/ibex-vp-cosim" build/matmul_plugin_direct.so
+fi
 
 started=0
 qemu_pid=
@@ -53,22 +64,27 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-if "$B/matmul_daemon" --socket "$SOCK" --ping >/dev/null 2>&1; then
-  echo "Using running matmul daemon on $SOCK"
+if [[ "$use_direct" == 1 ]]; then
+  plugin="$B/matmul_plugin_direct.so"
+  echo "QEMU TCG (Ibex firmware) + TCG plugin computing inside QEMU (direct, no daemon)."
 else
-  "$CTL" start
-  started=1
+  if "$B/matmul_daemon" --socket "$SOCK" --ping >/dev/null 2>&1; then
+    echo "Using running matmul daemon on $SOCK"
+  else
+    "$CTL" start
+    started=1
+  fi
+  log_start=$(($(wc -l <"$LOG" 2>/dev/null || echo 0) + 1))
+  plugin="$B/matmul_plugin.so,socket=$SOCK"
+  echo "QEMU TCG (Ibex firmware) + TCG plugin -> matmul daemon. Not cycle-accurate."
 fi
-log_start=$(($(wc -l <"$LOG" 2>/dev/null || echo 0) + 1))
-
-echo "QEMU TCG (Ibex firmware) + TCG plugin -> matmul daemon. Not cycle-accurate."
 if [[ "$use_gdb" == 1 ]]; then
   echo "QEMU is paused, waiting for GDB on port $GDB_PORT. In another terminal:"
   echo "  source ./env.sh"
   echo "  riscv32-unknown-elf-gdb $B/matmul_accel.elf -ex 'target remote :$GDB_PORT'"
 fi
 "$QEMU" -M ibexdemo -nographic -kernel "$B/matmul_accel.elf" \
-  -plugin "$B/matmul_plugin.so,socket=$SOCK" ${qemu_extra[@]+"${qemu_extra[@]}"} \
+  -plugin "$plugin" ${qemu_extra[@]+"${qemu_extra[@]}"} \
   "$@" </dev/null &
 qemu_pid=$!
 
@@ -84,8 +100,10 @@ done
 rc=0
 wait "$qemu_pid" || rc=$?
 
-echo "--- matmul daemon log ($LOG) ---"
-tail -n "+$log_start" "$LOG" 2>/dev/null || echo "(no daemon log; foreground daemon?)"
+if [[ "$use_direct" == 0 ]]; then
+  echo "--- matmul daemon log ($LOG) ---"
+  tail -n "+$log_start" "$LOG" 2>/dev/null || echo "(no daemon log; foreground daemon?)"
+fi
 if [[ "$rc" == 0 ]]; then
   echo "Result: PASS"
 else

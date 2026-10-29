@@ -173,7 +173,7 @@ The first run builds QEMU if step 8 didn't, then builds the daemon, the plugin,
 and the matmul firmware. It should end with `Result: PASS`. Then run the tests:
 
 ```bash
-python3 ibex-vp-cosim/scripts/test_matmul_daemon.py    # expect: Ran 22 tests ... OK
+python3 ibex-vp-cosim/scripts/test_matmul_daemon.py    # expect: Ran 24 tests ... OK
 python3 ibex-vp-cosim/scripts/test_full_soc.py         # after step 8; expect: Ran 7 tests ... OK
 ./ibex-vp-cosim/run_full_soc.sh                        # after step 8; Ctrl+A, then X to exit
 ```
@@ -253,10 +253,10 @@ the daemon's log for this run, and stops the daemon it started. Expected:
 ```text
 matmul daemon started: pid 55602, socket /tmp/ibex-matmul-accel.sock, log ...
 [matmul plugin] connected to daemon pid 55602 at /tmp/ibex-matmul-accel.sock ...
-guest: kick 4x4 ... [matmul plugin] kick #1: 4x4 GEMM ... by daemon: 64 MACs, ...
+guest: kick 4x4 ... [matmul plugin] kick #1: 4x4 GEMM by daemon: 39.2 us = read A,B 11.42 + socket 26.00 + ...
 ok  checksum FFFE8FC9
 ...
-guest: kick 32x32 ... [matmul plugin] kick #4: 32x32 GEMM ... 32768 MACs, ...
+guest: kick 32x32 ... [matmul plugin] kick #4: 32x32 GEMM by daemon: 21.8 us = read A,B 1.38 + ...
 ok  checksum 001F11EC
 guest: kick N=33 (expect rejection) ... [matmul plugin] kick #5: rejected N=33 ...
 rejected
@@ -449,7 +449,7 @@ only to add plugin support when it's missing; it keeps the other options.
 ## Tests
 
 ```bash
-python3 ibex-vp-cosim/scripts/test_matmul_daemon.py   # 22 tests, a few seconds
+python3 ibex-vp-cosim/scripts/test_matmul_daemon.py   # 24 tests, a few seconds
 python3 ibex-vp-cosim/scripts/test_full_soc.py        # 7 tests, a few seconds
 ```
 

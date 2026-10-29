@@ -21,7 +21,7 @@ Three things to land with the audience:
 2. **No QEMU source changes.** It uses only the public plugin API. The only
    requirement is QEMU built with `--enable-plugins`.
 3. **Deterministic and robust.** The guest waits synchronously, and failures turn
-   into guest-visible error codes instead of hangs. 22 automated tests cover it,
+   into guest-visible error codes instead of hangs. 24 automated tests cover it,
    including a GDB session against the running VP.
 
 ---
@@ -77,7 +77,7 @@ Files and what they own:
 | `ibex-vp-cosim/matmul_daemon.sh` | start / stop / status / log / foreground |
 | `ibex-vp-cosim/run_matmul_plugin.sh` | one-command demo |
 | `ibex-vp-cosim/build_matmul_plugin.sh`, `Makefile` | builds, including enabling QEMU plugins |
-| `ibex-vp-cosim/scripts/test_matmul_daemon.py` | 22 tests |
+| `ibex-vp-cosim/scripts/test_matmul_daemon.py` | 24 tests |
 | `ibex-vp-cosim/scripts/bench_npu.py` | daemon vs direct (in-QEMU) benchmark |
 
 There are two interfaces, and each has its own header. Keeping them apart is
@@ -119,18 +119,18 @@ compare C with own GEMM
 
 Code to show for each step:
 
-1. **Firmware kick:** `sw/matmul_accel/main.c:49` (`kick()`). It writes the
+1. **Firmware kick:** `sw/matmul_accel/main.c:55` (`kick()`). It writes the
    mailbox, then the doorbell, then polls `STATUS` with a bound
    (`POLL_LIMIT`, line 14). The bound only matters if the plugin is missing.
    Otherwise the first read already sees `DONE`.
-2. **Doorbell detection:** `matmul_plugin.c:429` (`vcpu_tb_trans`). When QEMU
+2. **Doorbell detection:** `matmul_plugin.c:454` (`vcpu_tb_trans`). When QEMU
    translates a block of guest code, the plugin attaches a store-only memory
-   callback to every instruction. At run time `vcpu_mem_cb` (line 416) ignores
+   callback to every instruction. At run time `vcpu_mem_cb` (line 441) ignores
    everything except a store to `0x0011C014`.
-3. **Handling the kick:** `matmul_plugin.c:317` (`handle_kick`). It reads guest
+3. **Handling the kick:** `matmul_plugin.c:336` (`handle_kick`). It reads guest
    memory with `qemu_plugin_read_memory_vaddr`, validates, sends, receives,
    and writes back with `qemu_plugin_write_memory_vaddr`.
-4. **Request/response on the wire:** `matmul_plugin.c:194` (`transact`). It
+4. **Request/response on the wire:** `matmul_plugin.c:199` (`transact`). It
    assigns a sequence number, sends the header and payload, and waits for the
    reply under one deadline. It checks that the reply's magic, version and
    `seq` match and that it fits the buffer.
@@ -140,7 +140,7 @@ Code to show for each step:
    overflow wraps exactly like RV32 integer multiply and add, uses i-k-j loop
    order so rows of B are read sequentially, and is timed with a nanosecond
    clock.
-7. **Result check:** `main.c:69` (`run_size`) recomputes every element on the
+7. **Result check:** `main.c:75` (`run_size`) recomputes every element on the
    guest and prints a checksum.
 
 Why the guest sees `DONE` immediately: the memory callback runs on the vCPU
@@ -169,14 +169,14 @@ with its bounded poll and a clear "is the plugin loaded?" message.
 
 ### 5.2 Firmware: `sw/matmul_accel/main.c`
 
-- `main.c:134`: refuses to run if the firmware's memory (`_bss_end`) reaches
+- `main.c:140`: refuses to run if the firmware's memory (`_bss_end`) reaches
   into the mailbox. Without this check a large program would quietly corrupt
   its own data.
 - Test data comes from a small linear congruential generator in -128..127, so
   results are reproducible. The guest's own check can't overflow `int32`, which
   would be undefined behavior in C.
 - Sizes 4, 8, 16 and 32, then a deliberate N=33 to prove the error path.
-- `main.c:117` (`finish`) exits QEMU through the `sim_ctrl` register at
+- `main.c:123` (`finish`) exits QEMU through the `sim_ctrl` register at
   `0x20000`. Bit 0 halts, and bits 7:1 are the exit code, so PASS gives exit 0
   and FAIL gives exit 1. The demo needs no timeout and scripts can check the
   result directly.
@@ -185,20 +185,20 @@ with its bounded poll and a clear "is the plugin loaded?" message.
 
 **Lifecycle**
 
-- `qemu_plugin_install` (line 457) parses `socket=` and `timeout_ms=`, then
+- `qemu_plugin_install` (line 488) parses `socket=` and `timeout_ms=`, then
   connects to the daemon. If that fails it returns -1, and **QEMU refuses to
-  start** (line 499). Failing at startup is better than a guest error halfway
+  start** (line 530). Failing at startup is better than a guest error halfway
   through the demo.
-- `connect_daemon` (line 235) does connect, `HELLO`/`HELLO_ACK`, and logs the
+- `connect_daemon` (line 240) does connect, `HELLO`/`HELLO_ACK`, and logs the
   daemon's PID and how many requests it has served. That makes it obvious in
   the demo that QEMU is talking to another process.
 - `plugin_exit` prints counts of kicks, completed requests and failures.
 
 **I/O design: every wait has a deadline**
 
-- `wait_ready` (line 110) uses `poll` with a deadline. `send_full` (line 140)
-  and `recv_full` (line 159) both use it, so a stuck daemon can't freeze QEMU.
-- The socket is `O_NONBLOCK` (line 260). This came out of a bug found in
+- `wait_ready` (line 115) uses `poll` with a deadline. `send_full` (line 145)
+  and `recv_full` (line 164) both use it, so a stuck daemon can't freeze QEMU.
+- The socket is `O_NONBLOCK` (line 265). This came out of a bug found in
   testing; see section 7.
 - SIGPIPE is suppressed (`SO_NOSIGPIPE` on macOS, `MSG_NOSIGNAL` on Linux),
   so writing to a dead daemon returns an error instead of killing QEMU.
@@ -207,12 +207,12 @@ with its bounded poll and a clear "is the plugin loaded?" message.
 
 - After any transport failure, `transact` drops the connection, because the
   byte stream is in an unknown state.
-- `handle_kick` (line 367) retries **once** on a fresh connection. This is safe
+- `handle_kick` (line 384) retries **once** on a fresh connection. This is safe
   because a GEMM request is a pure function and has no side effects in the
   daemon. In other words, the request is idempotent.
 - If both attempts fail, the guest sees `STATUS = ERROR`, `ERRCODE = 3`.
 
-**Thread safety:** a mutex around the kick handler (line 424) protects the
+**Thread safety:** a mutex around the kick handler (line 449) protects the
 socket and static buffers if the machine ever had more than one vCPU.
 
 ### 5.4 Protocol: `include/matmul_daemon_protocol.h`
@@ -288,7 +288,7 @@ PID and count served. The control script uses it as the source of truth.
 
 | Decision | Why | Cost |
 | --- | --- | --- |
-| Accelerator in a separate process | Isolation, swappable models, crash containment, can be shared by several QEMUs | One socket round trip per request: +11–21 µs per request in the benchmark |
+| Accelerator in a separate process | Isolation, swappable models, crash containment, can be shared by several QEMUs | One socket round trip per request: +10–22 µs per request in the benchmark |
 | Synchronous request inside the store callback | Deterministic; the guest always sees a finished result | No overlap of guest compute and accelerator compute |
 | Unix socket, own binary protocol | Local, fast, file permissions for access control, no dependencies | Same machine only (TCP would be a small change) |
 | RAM mailbox + store callback | Plugin API only, no QEMU patch | Without the plugin the doorbell does nothing (firmware detects it) |
@@ -297,18 +297,24 @@ PID and count served. The control script uses it as the source of truth.
 | Fail QEMU at startup if no daemon | Clear error before the guest runs | Daemon must be started first (the launcher does it) |
 | Thread per client in the daemon | Simple; one slow client can't block others | A thread per QEMU instance (fine at this scale) |
 
-Benchmark (`scripts/bench_npu.py`, Apple M3 Pro, median of 7 runs, 2,000
-requests per size). The "direct" build is the same plugin compiled with
-`-DMATMUL_PLUGIN_DIRECT`, which runs the same kernel inside QEMU:
+Benchmark (`scripts/bench_npu.py`, Apple M3 Pro, median of 7 interleaved runs,
+2,000 requests per size, host wall-clock time). The "direct" build is the same
+plugin compiled with `-DMATMUL_PLUGIN_DIRECT`, which runs the same kernel inside
+QEMU. The plugin splits each request into phases:
 
-| Matrix | Direct (in QEMU) | Daemon | Daemon overhead |
-| --- | --- | --- | --- |
-| 4×4 | 3.0 µs | 14.1 µs | +11.1 µs |
-| 32×32 | 6.3 µs | 27.0 µs | +20.6 µs |
+| Matrix | Mode | Total | Read A,B | Socket | Compute | Write C |
+| --- | --- | --- | --- | --- | --- | --- |
+| 4×4 | Direct | 0.50 µs | 0.21 | – | 0.03 | 0.25 |
+| 4×4 | Daemon | 11.09 µs | 0.31 | 10.18 | 0.04 | 0.54 |
+| 32×32 | Direct | 3.75 µs | 0.37 | – | 3.04 | 0.35 |
+| 32×32 | Daemon | 25.85 µs | 0.67 | 19.86 | 4.32 | 1.00 |
 
-Guest work with no NPU requests is unaffected by the choice: both builds add
-2–4% over running without a plugin. **Per request, the direct implementation is
-faster; communication dominates for small matrices.** The daemon earns its
+The socket round trip is 90–96% of the difference. Guest work with no NPU
+requests is the same for both builds (within 0.3%); both add about 9–11% over
+running without a plugin, because the plugin sees every guest store. **Per
+request, the direct implementation is faster; communication dominates for
+small matrices.** To show this live: `bench_npu.py --npu-only` (a few seconds),
+or `run_matmul_plugin.sh` next to `run_matmul_plugin.sh --direct`. The daemon earns its
 cost through isolation, swappable or heavy models, and sharing. It could only
 win on speed with asynchronous requests (extension 3), which let the guest keep
 running while the NPU computes. That is the usual offload trade-off and a good
@@ -342,27 +348,34 @@ driven by evidence:
    process name before using the fallback.
 5. **A silent first build.** The launcher hid build output, so a first-run
    QEMU rebuild (several minutes) looked like a hang. Fix: show it.
+6. **Writing C was slower than the whole request.** Splitting each request
+   into phases showed "write C" at 100–500 µs in the demo, in both modes. The
+   firmware's result matrix shared a 4 KiB page with its code, so every write
+   of C made QEMU discard and retranslate that code. Page-aligning the
+   matrices cut it to about 0.5 µs. It had also inflated the first benchmark
+   numbers, so the lesson is to measure the parts, not just the total.
 
 ---
 
 ## 8. Testing strategy
 
-`python3 ibex-vp-cosim/scripts/test_matmul_daemon.py`: 22 tests in about 5 s.
+`python3 ibex-vp-cosim/scripts/test_matmul_daemon.py`: 24 tests in about 6 s.
 Each test uses its own temporary socket, so tests can't interfere with each
 other or with a running demo daemon.
 
 | Layer | What is proven | Tests (line) |
 | --- | --- | --- |
-| Daemon lifecycle | detach, pidfile, 0600 socket, SIGTERM cleanup, refusing a second daemon, stale-socket recovery, never deleting a non-socket file | 164–205 |
-| Protocol correctness | N = 1..64 against a Python reference with full-range int32 and wrap-around; requests sent 5 bytes at a time | 214–234 |
-| Protocol errors | each error code, and which errors keep or close the connection | 246–265 |
-| Concurrency | 6 clients × 15 random GEMMs at once; total count checked | 283 |
-| QEMU end to end | firmware PASS via the daemon; QEMU refuses to start without a daemon; firmware fails cleanly without the plugin | 317–339 |
-| Recovery | restart the daemon while QEMU is paused (`-S`, resumed via the monitor socket); the plugin logs `Broken pipe`, reconnects, PASS | 345 |
-| Timeouts | a fake daemon that never answers: guest gets error 3 and QEMU exits instead of hanging | 375 |
-| Benchmark baseline | the direct (in-QEMU) build produces the same checksums as the daemon; `log=summary` prints per-size timing | 408–419 |
-| GDB | QEMU's GDB server with the daemon plugin: break in `kick()`, run the request, read STATUS and C, run to exit | 433 |
-| Scripts | launcher starts and stops its own daemon; reuses an existing one; count accumulates | 475–486 |
+| Daemon lifecycle | detach, pidfile, 0600 socket, SIGTERM cleanup, refusing a second daemon, stale-socket recovery, never deleting a non-socket file | 165–206 |
+| Protocol correctness | N = 1..64 against a Python reference with full-range int32 and wrap-around; requests sent 5 bytes at a time | 215–235 |
+| Protocol errors | each error code, and which errors keep or close the connection | 247–266 |
+| Concurrency | 6 clients × 15 random GEMMs at once; total count checked | 284 |
+| QEMU end to end | firmware PASS via the daemon; QEMU refuses to start without a daemon; firmware fails cleanly without the plugin | 318–340 |
+| Recovery | restart the daemon while QEMU is paused (`-S`, resumed via the monitor socket); the plugin logs `Broken pipe`, reconnects, PASS | 346 |
+| Timeouts | a fake daemon that never answers: guest gets error 3 and QEMU exits instead of hanging | 376 |
+| Benchmark baseline | the direct (in-QEMU) build produces the same checksums as the daemon; `log=summary` prints per-size timing split by phase | 409–420 |
+| GDB | QEMU's GDB server with the daemon plugin: break in `kick()`, run the request, read STATUS and C, run to exit | 434 |
+| Scripts | launcher starts and stops its own daemon; reuses an existing one; count accumulates | 476–487 |
+| Comparison tools | `run_matmul_plugin.sh --direct` runs with no daemon; `bench_npu.py --npu-only` prints the per-phase table | 505–518 |
 
 Talking point: the recovery and timeout tests aren't for show. The timeout test
 is what found bug 3.
@@ -390,9 +403,10 @@ Point out, in order:
 - `[matmul plugin] connected to daemon pid …`: the same PID; QEMU is talking to it.
 - `guest: kick 4x4 ... [matmul plugin] kick #1 …`: the plugin line appears
   *inside* the guest's line, which shows the guest is paused during the request.
-- `compute 3.8 us, round trip …`: communication costs more than the math. (The
-  first request includes connection warm-up; the benchmark gives steady-state
-  numbers.)
+- `… by daemon: 21.8 us = read A,B 1.38 + socket 16.17 + compute 3.54 + write C 0.75`:
+  the socket costs more than the math. Run `run_matmul_plugin.sh --direct` next
+  to it: the same line has no socket term and totals a few µs. (Single requests
+  vary; `bench_npu.py --npu-only` gives averages in a few seconds.)
 - `rejected` for N=33, then `PASS`, then the daemon's own log of the same requests.
 
 **Demo B: two terminals (the daemon as a visible service)**
@@ -419,7 +433,7 @@ runs: one long-lived accelerator, many simulations.
 "$QEMU" -M ibexdemo -nographic -kernel ibex-vp-cosim/build/matmul_accel.elf
 #   -> no plugin: "no response (is the plugin loaded?)", FAIL, exit 1
 
-python3 ibex-vp-cosim/scripts/test_matmul_daemon.py   # 22 tests, about 5 s
+python3 ibex-vp-cosim/scripts/test_matmul_daemon.py   # 24 tests, about 6 s
 python3 ibex-vp-cosim/scripts/bench_npu.py            # daemon vs direct, about 1 minute
 ```
 
@@ -479,8 +493,9 @@ The socket is owner-only (0600), so other local users can't connect. Every
 length and size is checked before use, and malformed framing closes the
 connection. It is meant for a local development machine, not a hostile network.
 
-**Why does a request take 14–27 µs through the daemon when the math takes 3–6 µs?**
-Two process context switches plus socket copies. For small matrices the
+**Why does a request take 11–26 µs through the daemon when the math takes 0.03–4 µs?**
+Two process context switches plus socket copies; the per-phase breakdown shows
+the socket round trip is 90–96% of the extra time. For small matrices the
 overhead dominates. That is the same reason real systems batch work or use
 shared memory, and it is extension 5 above.
 

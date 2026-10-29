@@ -12,7 +12,11 @@
  *                     MMD_DEFAULT_SOCKET)
  *   timeout_ms=N      per-request send+reply timeout (default 5000)
  *   log=kicks|summary one line per request (default), or only per-size
- *                     timing totals at exit (for benchmarks)
+ *                     timing averages at exit (for benchmarks)
+ *
+ * Timing is host wall-clock time, split into phases: reading A and B from
+ * guest memory, the socket round trip (excluding the daemon's compute time),
+ * the GEMM itself (measured where it runs), and writing C and STATUS back.
  *
  * Built with -DMATMUL_PLUGIN_DIRECT, the same plugin computes the GEMM itself
  * instead of calling the daemon. That build exists only as the "direct"
@@ -72,9 +76,10 @@ static struct {
     uint32_t seq;
     uint64_t kicks, done, failed;
     bool log_kicks;
-    /* Time spent handling successful requests, by matrix size. */
-    uint64_t size_count[MATMUL_ACCEL_MAX_N + 1];
-    uint64_t size_ns[MATMUL_ACCEL_MAX_N + 1];
+    /* Host wall-clock time for successful requests, by matrix size. */
+    struct {
+        uint64_t count, total_ns, read_ns, socket_ns, compute_ns, write_ns;
+    } size[MATMUL_ACCEL_MAX_N + 1];
 } st = {.fd = -1, .timeout_ms = 5000, .log_kicks = true};
 
 static void log_line(const char *fmt, ...) G_GNUC_PRINTF(1, 2);
@@ -314,6 +319,20 @@ static void finish(uint32_t status, uint32_t errcode) {
 
 /* ----------------------------------------------------------------- doorbell */
 
+/* "read A,B 1.0 + socket 9.8 + compute 0.2 + write C 0.9" (us; per request). */
+static char *breakdown(uint64_t count, uint64_t read_ns, uint64_t socket_ns,
+                       uint64_t compute_ns, uint64_t write_ns) {
+    double k = 1000.0 * (double)count;
+#ifdef MATMUL_PLUGIN_DIRECT
+    (void)socket_ns;
+    return g_strdup_printf("read A,B %.2f + compute %.2f + write C %.2f", read_ns / k,
+                           compute_ns / k, write_ns / k);
+#else
+    return g_strdup_printf("read A,B %.2f + socket %.2f + compute %.2f + write C %.2f",
+                           read_ns / k, socket_ns / k, compute_ns / k, write_ns / k);
+#endif
+}
+
 static void handle_kick(void) {
     static uint32_t ab[2 * MAX_ELEMS];
     static _Alignas(8) uint8_t resp[sizeof(MmdGemmDone) + MAX_ELEMS * sizeof(uint32_t)];
@@ -322,7 +341,7 @@ static void handle_kick(void) {
     MmdGemmDone done;
     MmdHeader rh;
     uint32_t n, a_addr, b_addr, c_addr, bytes;
-    uint64_t t0, t_kick = now_ns();
+    uint64_t t_kick = now_ns(), t_read, t_xfer, t_end, compute_ns, socket_ns;
     bool sent = false;
 
     st.kicks++;
@@ -349,21 +368,19 @@ static void handle_kick(void) {
         return;
     }
 
-#ifdef MATMUL_PLUGIN_DIRECT
-    t0 = now_ns();
-    {
-        uint32_t *c = (uint32_t *)(resp + sizeof(MmdGemmDone));
+    t_read = now_ns();
 
-        mmd_gemm(n, ab, ab + n * n, c);
-        done = (MmdGemmDone){.n = n, .macs = (uint64_t)n * n * n};
-        done.compute_ns = now_ns() - t0;
-    }
+#ifdef MATMUL_PLUGIN_DIRECT
+    mmd_gemm(n, ab, ab + n * n, (uint32_t *)(resp + sizeof(MmdGemmDone)));
+    t_xfer = now_ns();
+    compute_ns = t_xfer - t_read;
+    socket_ns = 0;
     (void)req;
     (void)rh;
     (void)sent;
+    (void)done;
 #else
     req = (MmdGemmReq){.n = mmd_le32(n)};
-    t0 = now_ns();
     for (int attempt = 0; attempt < 2 && !sent; attempt++) {
         if (st.fd < 0 && !connect_daemon()) {
             continue;
@@ -371,6 +388,7 @@ static void handle_kick(void) {
         sent = transact(MMD_MSG_GEMM, &req, sizeof(req), ab, 2 * (size_t)bytes, &rh,
                         resp, sizeof(resp));
     }
+    t_xfer = now_ns();
     if (!sent) {
         log_line("kick #%" PRIu64 ": daemon unavailable", st.kicks);
         finish(MATMUL_ACCEL_ERROR, MATMUL_ACCEL_ERR_DAEMON_IO);
@@ -394,22 +412,29 @@ static void handle_kick(void) {
         finish(MATMUL_ACCEL_ERROR, MATMUL_ACCEL_ERR_REJECTED);
         return;
     }
+    /* The daemon times its own GEMM; the rest of the exchange is socket time. */
+    compute_ns = mmd_le64(done.compute_ns);
+    socket_ns = t_xfer - t_read > compute_ns ? t_xfer - t_read - compute_ns : 0;
 #endif
-    if (!guest_write(c_addr, resp + sizeof(done), bytes)) {
+    if (!guest_write(c_addr, resp + sizeof(MmdGemmDone), bytes)) {
         log_line("kick #%" PRIu64 ": cannot write C@0x%08" PRIx32, st.kicks, c_addr);
         finish(MATMUL_ACCEL_ERROR, MATMUL_ACCEL_ERR_GUEST_MEM);
         return;
     }
     finish(MATMUL_ACCEL_DONE, MATMUL_ACCEL_ERR_NONE);
-    st.size_count[n]++;
-    st.size_ns[n] += now_ns() - t_kick;
+    t_end = now_ns();
+
+    st.size[n].count++;
+    st.size[n].total_ns += t_end - t_kick;
+    st.size[n].read_ns += t_read - t_kick;
+    st.size[n].socket_ns += socket_ns;
+    st.size[n].compute_ns += compute_ns;
+    st.size[n].write_ns += t_end - t_xfer;
     if (st.log_kicks) {
-        log_line("kick #%" PRIu64 ": %" PRIu32 "x%" PRIu32 " GEMM A@0x%08" PRIx32
-                 " B@0x%08" PRIx32 " -> C@0x%08" PRIx32 " by %s: %" PRIu64
-                 " MACs, compute %.1f us, round trip %.1f us",
-                 st.kicks, n, n, a_addr, b_addr, c_addr, MODE_NAME,
-                 mmd_le64(done.macs), mmd_le64(done.compute_ns) / 1000.0,
-                 (now_ns() - t0) / 1000.0);
+        g_autofree char *parts = breakdown(1, t_read - t_kick, socket_ns, compute_ns,
+                                           t_end - t_xfer);
+        log_line("kick #%" PRIu64 ": %" PRIu32 "x%" PRIu32 " GEMM by %s: %.1f us = %s",
+                 st.kicks, n, n, MODE_NAME, (t_end - t_kick) / 1000.0, parts);
     }
 }
 
@@ -443,11 +468,17 @@ static void plugin_exit(qemu_plugin_id_t id, void *udata) {
     g_mutex_lock(&st.lock);
     log_line("exit: %" PRIu64 " kicks, %" PRIu64 " done, %" PRIu64 " failed", st.kicks,
              st.done, st.failed);
-    for (int n = 1; n <= MATMUL_ACCEL_MAX_N; n++) {
-        if (st.size_count[n]) {
-            log_line("timing [%s] n=%d: %" PRIu64 " requests, avg %.2f us per request",
-                     MODE_NAME, n, st.size_count[n],
-                     st.size_ns[n] / 1000.0 / (double)st.size_count[n]);
+    for (int n = 1; n <= MATMUL_ACCEL_MAX_N && !st.log_kicks; n++) {
+        uint64_t count = st.size[n].count;
+
+        if (count) {
+            g_autofree char *parts = breakdown(count, st.size[n].read_ns,
+                                               st.size[n].socket_ns,
+                                               st.size[n].compute_ns,
+                                               st.size[n].write_ns);
+            log_line("timing [%s] n=%d: %" PRIu64 " requests, avg %.2f us = %s",
+                     MODE_NAME, n, count, st.size[n].total_ns / 1000.0 / (double)count,
+                     parts);
         }
     }
     disconnect();

@@ -16,12 +16,18 @@
 #define BENCH_REPS 2000u
 #endif
 #ifndef IO_REPS
-#define IO_REPS 6000u
+#define IO_REPS 24000u
 #endif
 
-static int32_t a[MAX_N * MAX_N];
-static int32_t b[MAX_N * MAX_N];
-static int32_t c[MAX_N * MAX_N];
+/*
+ * Page-aligned so the plugin's writes to C never touch a 4 KiB page that holds
+ * code. A write to a code page makes QEMU discard and retranslate that code,
+ * which costs far more than the NPU request itself.
+ */
+#define PAGE_ALIGNED __attribute__((aligned(4096)))
+static int32_t a[MAX_N * MAX_N] PAGE_ALIGNED;
+static int32_t b[MAX_N * MAX_N] PAGE_ALIGNED;
+static int32_t c[MAX_N * MAX_N] PAGE_ALIGNED;
 
 static void reg_write(uint32_t addr, uint32_t value) {
   *(volatile uint32_t *)addr = value;

@@ -13,9 +13,15 @@
 #define MAX_N MATMUL_ACCEL_MAX_N
 #define POLL_LIMIT 100000u
 
-static int32_t a[MAX_N * MAX_N];
-static int32_t b[MAX_N * MAX_N];
-static int32_t c[MAX_N * MAX_N];
+/*
+ * Page-aligned so the plugin's writes to C never touch a 4 KiB page that holds
+ * code. A write to a code page makes QEMU discard and retranslate that code,
+ * which costs far more than the NPU request itself.
+ */
+#define PAGE_ALIGNED __attribute__((aligned(4096)))
+static int32_t a[MAX_N * MAX_N] PAGE_ALIGNED;
+static int32_t b[MAX_N * MAX_N] PAGE_ALIGNED;
+static int32_t c[MAX_N * MAX_N] PAGE_ALIGNED;
 
 extern char _bss_end[];
 
@@ -130,7 +136,7 @@ int main(void) {
   static const uint32_t sizes[] = {4, 8, 16, MAX_N};
   uint32_t failures = 0, i, status;
 
-  puts("guest: matmul accelerator test (QEMU TCG plugin -> matmul daemon)\n");
+  puts("guest: matmul accelerator test (NPU behind the QEMU TCG plugin)\n");
   if ((uint32_t)(uintptr_t)_bss_end > MATMUL_ACCEL_BASE) {
     puts("guest: firmware overlaps the accelerator mailbox\n");
     finish(0);

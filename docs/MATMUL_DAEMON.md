@@ -49,6 +49,10 @@ The mailbox is ordinary guest RAM below the stack, so firmware must end below
 `STATUS` never changes and the firmware reports `no response` after a bounded
 poll instead of hanging.
 
+Keep A, B, and C in page-aligned buffers, as the test firmware does. If C
+shares a 4 KiB page with code, each write of the result makes QEMU discard and
+retranslate that code, which costs 100–500 µs per request.
+
 ## Socket protocol (`matmul_daemon_protocol.h`)
 
 Unix stream socket, default `/tmp/ibex-matmul-accel.sock`, overridden by
@@ -90,6 +94,10 @@ because the byte stream can no longer be trusted.
 - Plugin arguments: `socket=PATH`, `log=kicks|summary` (per-request lines or
   per-size timing at exit), and `timeout_ms=N` (default 5000), the deadline
   for sending a request and receiving its reply.
+- Timing is host wall-clock time, split into phases: `read A,B` (guest memory
+  reads), `socket` (the exchange with the daemon minus the daemon's compute
+  time), `compute` (the GEMM, timed where it runs), and `write C` (writing C,
+  ERRCODE, and STATUS).
 - At load time the plugin connects and exchanges `HELLO`. If the daemon is not
   reachable, QEMU exits before the guest starts.
 - If a request fails because of the connection, the plugin reconnects once and
@@ -107,7 +115,7 @@ because the byte stream can no longer be trusted.
 python3 ibex-vp-cosim/scripts/test_matmul_daemon.py
 ```
 
-The 22 tests cover:
+The 24 tests cover:
 
 - Daemon lifecycle: detach, pidfile, socket permissions, SIGTERM cleanup,
   refusing a second daemon, stale-socket recovery, and never deleting a
@@ -123,7 +131,9 @@ The 22 tests cover:
 - GDB: a debugging session through QEMU's GDB server with the plugin and daemon
   attached (break in `kick()`, run the request, read STATUS and C, run to exit).
 - Benchmark baseline: the direct (in-QEMU) build gives the same results as the
-  daemon, and `log=summary` reports per-size timing.
+  daemon, `log=summary` reports per-size timing split by phase, and the quick
+  benchmark prints its breakdown table.
+- Launcher `--direct`: runs the demo with no daemon.
 
 Performance against the direct (in-QEMU) build: `scripts/bench_npu.py`; results
 are in the [README](../README.md#performance).

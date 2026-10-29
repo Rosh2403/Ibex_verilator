@@ -12,6 +12,7 @@ import shutil
 import socket
 import stat
 import struct
+import sys
 import subprocess
 import tempfile
 import threading
@@ -413,8 +414,8 @@ class MatmulDaemonTests(unittest.TestCase):
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertNotIn("kick #1:", proc.stderr)  # no per-request lines
-        for n in (4, 8, 16, 32):
-            self.assertIn(f"timing [daemon] n={n}: 1 requests", proc.stderr)
+        for n in (4, 8, 16, 32):  # total = read + socket + compute + write
+            self.assertRegex(proc.stderr, rf"timing \[daemon\] n={n}: 1 requests, avg [0-9.]+ us = read A,B [0-9.]+ \+ socket [0-9.]+ \+ compute [0-9.]+ \+ write C [0-9.]+")
 
     def test_direct_baseline_plugin_matches_daemon_results(self):
         """The benchmark baseline must compute the same results without a daemon."""
@@ -500,6 +501,29 @@ class MatmulDaemonTests(unittest.TestCase):
         finally:
             subprocess.run(["bash", ctl, "stop"], env=env, capture_output=True)
         self.assertFalse(self.daemon.socket.exists())
+
+    def test_launcher_direct_mode_needs_no_daemon(self):
+        env = dict(os.environ, IBEX_MATMUL_SOCKET=str(self.daemon.socket))
+        proc = subprocess.run(["bash", COSIM / "run_matmul_plugin.sh", "--direct"], env=env,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("Result: PASS", proc.stdout)
+        # Plugin lines go to QEMU's stderr.
+        self.assertRegex(proc.stderr, r"kick #4: 32x32 GEMM by plugin \(direct\): [0-9.]+ us = "
+                                      r"read A,B [0-9.]+ \+ compute [0-9.]+ \+ write C [0-9.]+")
+        self.assertNotRegex(proc.stderr, r"kick #\d+:.*socket")
+        self.assertFalse(self.daemon.socket.exists(), "direct mode must not start a daemon")
+
+    def test_benchmark_npu_only_prints_breakdown(self):
+        proc = subprocess.run([sys.executable, COSIM / "scripts/bench_npu.py", "--npu-only", "--runs", "1"],
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("| Matrix | Mode | Total | Read A,B | Socket | Compute | Write C |", proc.stdout)
+        for n in (4, 8, 16, 32):
+            self.assertRegex(proc.stdout, rf"\| {n}×{n} \| Direct \(in QEMU\) \| [0-9.]+ \| [0-9.]+ \| – \|")
+            self.assertRegex(proc.stdout, rf"\| {n}×{n} \| Daemon \| [0-9.]+ \| [0-9.]+ \| [0-9.]+ \|")
+        self.assertNotIn("Guest CPU + UART workload", proc.stdout)
 
 
 if __name__ == "__main__":
