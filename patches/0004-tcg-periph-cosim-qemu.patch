@@ -2,36 +2,31 @@ diff --git a/hw/ibexdemo/Kconfig b/hw/ibexdemo/Kconfig
 index 26eaec0..9c2d269 100644
 --- a/hw/ibexdemo/Kconfig
 +++ b/hw/ibexdemo/Kconfig
-@@ -18,3 +18,9 @@ config IBEXDEMO_UART
+@@ -18,3 +18,6 @@ config IBEXDEMO_UART
  
  config IBEXDEMO_COSIM_BRIDGE
      bool
 +
 +config IBEXDEMO_PERIPH_BRIDGE
 +    bool
-+
-+config IBEXDEMO_VERILATOR_IFACE
-+    bool
-diff --git a/hw/ibexdemo/meson.build b/hw/ibexdemo/meson.build
+ diff --git a/hw/ibexdemo/meson.build b/hw/ibexdemo/meson.build
 index 6c40fde..eceedda 100644
 --- a/hw/ibexdemo/meson.build
 +++ b/hw/ibexdemo/meson.build
-@@ -6,3 +6,5 @@ system_ss.add(when: 'CONFIG_IBEXDEMO_SPI', if_true: files('ibexdemo_spi.c'))
+@@ -6,3 +6,4 @@ system_ss.add(when: 'CONFIG_IBEXDEMO_SPI', if_true: files('ibexdemo_spi.c'))
  system_ss.add(when: 'CONFIG_IBEXDEMO_TIMER', if_true: files('ibexdemo_timer.c'))
  system_ss.add(when: 'CONFIG_IBEXDEMO_UART', if_true: files('ibexdemo_uart.c'))
  system_ss.add(when: 'CONFIG_IBEXDEMO_COSIM_BRIDGE', if_true: files('ibexdemo_cosim_bridge.c'))
 +system_ss.add(when: 'CONFIG_IBEXDEMO_PERIPH_BRIDGE', if_true: files('ibexdemo_periph_bridge.c'))
-+system_ss.add(when: 'CONFIG_IBEXDEMO_VERILATOR_IFACE', if_true: files('ibexdemo_verilator_iface.c'))
-diff --git a/hw/riscv/Kconfig b/hw/riscv/Kconfig
+ diff --git a/hw/riscv/Kconfig b/hw/riscv/Kconfig
 index 8580d6e..0aed6b6 100644
 --- a/hw/riscv/Kconfig
 +++ b/hw/riscv/Kconfig
-@@ -125,6 +125,8 @@ config IBEXDEMO
+@@ -125,6 +125,7 @@ config IBEXDEMO
      select IBEX_CLOCK_SRC
      select IBEX_COMMON
      select IBEXDEMO_COSIM_BRIDGE
 +    select IBEXDEMO_PERIPH_BRIDGE
-+    select IBEXDEMO_VERILATOR_IFACE
      select IBEXDEMO_GPIO
      select IBEXDEMO_SIMCTRL
      select IBEXDEMO_SPI
@@ -39,13 +34,11 @@ diff --git a/hw/riscv/ibexdemo.c b/hw/riscv/ibexdemo.c
 index d21335d..b6a946d 100644
 --- a/hw/riscv/ibexdemo.c
 +++ b/hw/riscv/ibexdemo.c
-@@ -26,6 +26,9 @@
+@@ -26,6 +26,7 @@
  #include "hw/boards.h"
  #include "hw/display/st7735.h"
  #include "hw/ibexdemo/ibexdemo_cosim_bridge.h"
 +#include "hw/ibexdemo/ibexdemo_periph_bridge.h"
-+#include "hw/ibexdemo/cosim_soc_protocol.h"
-+#include "hw/ibexdemo/ibexdemo_verilator_iface.h"
  #include "hw/ibexdemo/ibexdemo_gpio.h"
  #include "hw/ibexdemo/ibexdemo_simctrl.h"
  #include "hw/ibexdemo/ibexdemo_spi.h"

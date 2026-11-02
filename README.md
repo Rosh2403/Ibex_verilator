@@ -1,254 +1,432 @@
-# Ibex Demo System: QEMU + Verilator
+# Ibex VP with a daemon-based NPU (QEMU TCG plugin)
 
-Run every command from the **repository root** (`~/Ibex_verilator`), not from
-`verilator/`:
+A virtual platform (VP) for the lowRISC Ibex Demo System with an NPU that runs
+as **its own host process**. The two are connected by a **QEMU TCG plugin**.
+
+- **VP:** QEMU's `ibexdemo` machine runs the Ibex RISC-V firmware with TCG.
+- **NPU:** `matmul_daemon`, a separate process that performs integer
+  matrix multiplies (GEMM) for any number of VP instances.
+- **Connection:** `matmul_plugin.so`, loaded into QEMU with `-plugin`. When the
+  firmware writes the NPU doorbell, the plugin sends the matrices to the daemon
+  over a Unix socket and writes the result back into guest memory.
+
+```text
+ qemu-system-riscv32 -M ibexdemo (the VP)              matmul_daemon (the NPU)
+ +-----------------------------------+                +------------------------------+
+ | Ibex firmware (TCG)               |                | Unix socket server           |
+ |   write N, A, B, C to the mailbox |  GEMM request  | one thread per VP            |
+ |   store 1 -> 0x0011C014 (doorbell)+--> plugin ---->|   C = A * B (int32, wrapping)|
+ |   read STATUS, use C              |<-- plugin <----|   logs every request         |
+ +-----------------------------------+   C + timing   +------------------------------+
+```
+
+The firmware waits at the doorbell store until the NPU answers, so results are
+deterministic. NPU timing isn't modeled; results are bit-exact. No QEMU source
+patch is needed, only QEMU built with plugin support.
+
+**Contents:** [Quick start](#quick-start) · [Set up from scratch](#set-up-from-scratch) ·
+[Running](#running-the-npu-and-the-vp) · [Debugging with GDB](#debugging-with-gdb) ·
+[Performance](#performance) · [Programming the NPU](#programming-the-npu-from-firmware) ·
+[Tests](#tests) · [Troubleshooting](#troubleshooting) · [Source map](#source-map)
+
+## Quick start
+
+Every command in this README runs from the repository folder. On a machine
+that is already set up, open a terminal and run:
 
 ```bash
-cd ~/Ibex_verilator
+cd ~/Ibex_verilator                      # the folder you cloned into
 source ./env.sh
+./ibex-vp-cosim/run_matmul_plugin.sh     # starts the NPU daemon, runs the VP; ends with "Result: PASS"
 ```
 
-The source trees, native tools, firmware, and simulator binaries may already be
-built in a prepared workspace. For another checkout, see the dependency section
-below.
+## Set up from scratch
 
-## Default simulator (QEMU TCG CPU + Verilator peripherals)
+From an empty directory on **Ubuntu or Debian (x86-64)**. The longest step is
+the one-time QEMU build (10–20 minutes). Everything except the `apt` packages
+is installed inside the repository.
 
-This is the **normal demo path** (`ibexdemo-cosim`):
-
-- **CPU and RAM:** QEMU TCG (fast functional Ibex).
-- **GPIO, UART, timer:** cycle-accurate Verilator RTL in `Vcosim_periph_server`.
-- **Link:** two processes on a **Unix socket** (`cosim_protocol.h`), not a single
-  linked binary.
-
-Build once, then launch:
+**1. System packages**
 
 ```bash
-./ibex-vp-cosim/build_periph_cosim.sh
-./ibex-vp-cosim/run_cosim.sh
+sudo apt update
+sudo apt install -y git curl xz-utils build-essential ninja-build pkg-config \
+  python3 python3-venv python3-tomli rustc \
+  libglib2.0-dev libpixman-1-dev zlib1g-dev libfdt-dev
 ```
 
-Expected: `Hello World!` on the UART console. Exit with **Ctrl+A, then X**.
+QEMU needs GLib, Pixman, zlib, and libfdt. This QEMU branch also wants a Rust
+compiler while configuring, even though Rust is disabled.
 
-QEMU TCG executes firmware; MMIO to `0x80000000` / `0x80001000` / `0x80002000`
-is forwarded to Verilator. Timer IRQs and UART bytes cross the socket. Guest
-`mcycle` on this path is **QEMU's counter**, not Ibex RTL pipeline time.
+**2. This repository**
 
-Equivalent launcher (same machine): `./ibex-vp-cosim/run_periph_cosim.sh`.
+```bash
+git clone -b ibex-matmul-daemon https://github.com/Rosh2403/Ibex_verilator.git
+cd Ibex_verilator
+source ./env.sh            # sets ROOT and QEMU; adds toolchain/bin to PATH
+```
 
-Socket override: `IBEXDEMO_COSIM_SOCKET=/tmp/my.sock ./ibex-vp-cosim/run_cosim.sh`.
+**3. RISC-V toolchain** (lowRISC's prebuilt GCC and GDB, unpacked into `toolchain/`)
 
-## TCG plugin matmul (host accelerator, no Verilator)
+```bash
+mkdir -p toolchain
+curl -L https://github.com/lowRISC/lowrisc-toolchains/releases/download/20220524-1/lowrisc-toolchain-gcc-rv32imcb-20220524-1.tar.xz \
+  | tar -xJ -C toolchain --strip-components=1
+riscv32-unknown-elf-gcc --version
+```
 
-A **QEMU TCG plugin** (`ibex-vp-cosim/tcg_plugin/matmul_plugin.so`) intercepts a
-guest store to doorbell **`0x0011C014`**. The plugin reads matrix pointers from a
-small RAM mailbox (`matmul_accel.h`), runs **4x4 integer GEMM on the host**, writes
-`C` back, and sets a done flag. Guest firmware is in `sw/matmul_accel/`.
+Any bare-metal RV32IMC GCC named `riscv32-unknown-elf-*` works; the build
+detects which ISA naming it uses.
 
-This is for **offload / hook demos**. It is not cycle-accurate and does not use
-Verilator. QEMU must be built with plugins (`build_matmul_plugin.sh` handles that
-when needed).
+**4. QEMU and the Ibex Demo System sources** (pinned revisions)
+
+```bash
+git clone https://github.com/lowRISC/qemu.git qemu
+git -C qemu checkout d7655281a649abb339f5267f0b9e05329b3cee6d       # ot-10.2.0
+git clone https://github.com/lowRISC/ibex-demo-system.git ibex-demo-system
+git -C ibex-demo-system checkout d37beb753e19482eb054aefac73a27289bf72e47
+```
+
+From ibex-demo-system, the firmware only uses the startup code, small drivers
+(`sw/c/common/`), and the linker script.
+
+**5. Configure QEMU with TCG plugin support**
+
+```bash
+mkdir -p qemu/build
+(cd qemu/build && ../configure --target-list=riscv32-softmmu \
+  --without-default-features --enable-tcg --enable-tools --disable-rust \
+  --enable-plugins)
+```
+
+**6. Build and run** (still inside `Ibex_verilator/`)
+
+```bash
+./ibex-vp-cosim/run_matmul_plugin.sh                  # first run builds QEMU; ends with "Result: PASS"
+python3 ibex-vp-cosim/scripts/test_matmul_daemon.py   # expect: Ran 24 tests ... OK
+```
+
+**macOS (Apple Silicon):** use the
+[xPack RISC-V GCC](https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack/releases)
+for step 3. Unpack it the same way, then add the expected names:
+
+```bash
+(cd toolchain/bin && for t in riscv-none-elf-*; do
+   ln -sf "$t" "riscv32-unknown-elf-${t#riscv-none-elf-}"; done)
+```
+
+Install the step 1 libraries with your package manager. The prepared Mac's exact
+setup is in [LOCAL_SETUP.md](LOCAL_SETUP.md).
+
+## Running the NPU and the VP
+
+### One command
 
 ```bash
 ./ibex-vp-cosim/run_matmul_plugin.sh
 ```
 
-Expected console:
+The launcher does the following:
+
+1. Rebuilds what changed.
+2. Starts an NPU daemon if none is running.
+3. Runs the VP with the plugin.
+4. Prints the daemon's log for this run.
+5. Stops the daemon if it started it.
+
+The test firmware runs 4×4, 8×8, 16×16 and 32×32 GEMMs on the NPU. It checks
+every element against its own calculation, checks that an oversized request is
+rejected, and exits QEMU with 0 on PASS. Expected:
 
 ```text
-[matmul plugin] loaded; kick store at 0x0011C014
-guest: kick host matmul
-[matmul plugin] host 4x4 GEMM  A@... B@... -> C@...
-guest: C sum 000003B8 expect 000003B8
+matmul daemon started: pid 55602, socket /tmp/ibex-matmul-accel.sock, log ...
+[matmul plugin] connected to daemon pid 55602 at /tmp/ibex-matmul-accel.sock ...
+guest: kick 4x4 ... [matmul plugin] kick #1: 4x4 GEMM by daemon: 39.2 us = read A,B 11.42 + socket 26.00 + ...
+ok  checksum FFFE8FC9
+...
+guest: kick N=33 (expect rejection) ... [matmul plugin] kick #5: rejected N=33 ...
+rejected
 PASS
+--- matmul daemon log (/tmp/ibex-matmul-accel.sock.log) ---
+... [matmul-daemon] client 1 seq 5: GEMM 32x32 (32768 MACs) in 3750 ns [total 4]
+Result: PASS
 ```
 
-For a real MMIO accelerator (always present without `-plugin`), use a QEMU
-SysBus device (same idea as the peripheral bridge) or RTL in Verilator.
+| Option | Effect |
+| --- | --- |
+| `--gdb` | start the VP paused for GDB; see [Debugging with GDB](#debugging-with-gdb) |
+| `--direct` | same demo with the math inside QEMU and no daemon, to compare timings; see [Performance](#performance) |
+| extra arguments | passed to QEMU, e.g. `-d plugin` |
+| `KEEP_DAEMON=1` | leave a daemon the launcher started running |
+| `QEMU_TIMEOUT=N` | kill the VP after N seconds (default 60; 0 = never) |
+| `IBEX_MATMUL_SOCKET=PATH` | NPU socket (default `/tmp/ibex-matmul-accel.sock`) |
 
-## Matrix multiply on Ibex RTL (Verilator)
+### The NPU daemon as a long-running service
 
-Use this path to measure **Ibex `mcycle`**, executed cycles, and performance
-counter CSVs on the **full SoC** model (`Vtop_verilator`), not the default
-TCG+periph sim:
+Two terminals show the NPU and the VP as separate processes:
 
 ```bash
-./ibex-vp-cosim/run_matmul.sh        # 8x8 NxN GEMM
-./ibex-vp-cosim/run_matmul.sh 16     # other power-of-two N
-./ibex-vp-cosim/run_matmul_sweep.sh  # N = 8..256; writes sw/matmul/*.csv
+./ibex-vp-cosim/matmul_daemon.sh foreground   # terminal A: NPU with live log; Ctrl+C stops it
+./ibex-vp-cosim/run_matmul_plugin.sh          # terminal B: run the VP as often as you like
 ```
 
-Firmware: `ibex-vp-cosim/sw/matmul/`. Results: `matmul_sweep.csv`, `matmul_pcount.csv`.
+To run it in the background:
 
-**Rule of thumb:** Ibex cycle counts → `run_matmul.sh`. Plugin doorbell demo →
-`run_matmul_plugin.sh`.
+```bash
+./ibex-vp-cosim/matmul_daemon.sh start        # detaches; returns once the socket is listening
+./ibex-vp-cosim/matmul_daemon.sh status       # pid and GEMMs served
+./ibex-vp-cosim/matmul_daemon.sh log -f       # follow its log
+./ibex-vp-cosim/matmul_daemon.sh restart
+./ibex-vp-cosim/matmul_daemon.sh stop         # SIGTERM; removes socket and pidfile
+```
 
-## Full-SoC RTL (CPU in Verilator)
+- One daemon serves many VPs: each QEMU connection gets its own thread.
+- The socket is owner-only (mode 0600). A socket left behind by a crash is
+  replaced on the next start.
+- `stop` asks the daemon for its pid over the socket, so it never signals an
+  unrelated process.
+
+### Running the pieces by hand
+
+```bash
+B=ibex-vp-cosim/build
+$B/matmul_daemon --socket /tmp/ibex-matmul-accel.sock --daemon   # omit --daemon to stay in the foreground
+$B/matmul_daemon --socket /tmp/ibex-matmul-accel.sock --ping     # query it
+
+"$QEMU" -M ibexdemo -nographic -kernel $B/matmul_accel.elf \
+  -plugin $B/matmul_plugin.so,socket=/tmp/ibex-matmul-accel.sock
+```
+
+| Plugin argument | Effect |
+| --- | --- |
+| `socket=PATH` | daemon socket (default `$IBEX_MATMUL_SOCKET` or `/tmp/ibex-matmul-accel.sock`) |
+| `timeout_ms=N` | deadline for sending each request and receiving its reply (default 5000) |
+| `log=kicks` / `log=summary` | one timing line per request (default), or per-size averages at exit |
+
+How failures are handled:
+
+- QEMU refuses to start if no daemon answers.
+- If the daemon restarts while the VP runs, the plugin reconnects once and
+  resends the request. This is safe because a GEMM has no side effects.
+- If the daemon stops answering, the firmware sees an error status instead of
+  QEMU hanging.
+
+## Debugging with GDB
+
+QEMU's GDB server works unchanged with the plugin and daemon attached.
+Breakpoints, stepping, and memory and register access behave as without the
+plugin. A request runs to completion inside the doorbell store, so stepping over
+that store returns with the result already in memory.
+
+Terminal A:
+
+```bash
+./ibex-vp-cosim/run_matmul_plugin.sh --gdb     # VP paused, GDB server on port 1234 (GDB_PORT=...)
+```
+
+Terminal B:
 
 ```bash
 source ./env.sh
-./ibex-vp-cosim/run_full_soc.sh
+riscv32-unknown-elf-gdb ibex-vp-cosim/build/matmul_accel.elf -ex 'target remote :1234'
+(gdb) break kick
+(gdb) continue                                  # stops before the first NPU request (n=4)
+(gdb) print/x *(unsigned int *)0x0011C010       # STATUS = 0x0 (idle)
+(gdb) finish                                    # runs the request through the daemon
+(gdb) print/x *(unsigned int *)0x0011C010       # STATUS = 0x1 (done)
+(gdb) print c[0]@4                              # first results from the NPU
+(gdb) continue                                  # runs to the end; QEMU exits
 ```
 
-The launcher starts Verilator, loads the hello-world ELF into RTL RAM, waits for
-the socket, and starts QEMU. Expected console output:
+Any QEMU GDB option works the same way, for example
+`run_matmul_plugin.sh -s -S`. While the VP is paused in GDB the daemon simply
+waits. Ubuntu's `gdb-multiarch` also works if your toolchain has no GDB.
+
+## Performance
+
+All times here are **host wall-clock time**: how long the computer running the
+simulation took. They are not Ibex clock cycles; NPU timing isn't modeled.
+
+The NPU daemon is compared with a **direct** implementation: the same plugin
+built with `-DMATMUL_PLUGIN_DIRECT`, which runs the GEMM inside QEMU. Both
+variants share the same instrumentation, mailbox handling, and GEMM kernel; only
+where the math runs differs.
+
+### Show the difference
+
+```bash
+python3 ibex-vp-cosim/scripts/bench_npu.py --npu-only   # per-request breakdown, a few seconds
+python3 ibex-vp-cosim/scripts/bench_npu.py              # adds the I/O workload, about 2 minutes
+./ibex-vp-cosim/run_matmul_plugin.sh                    # demo through the daemon
+./ibex-vp-cosim/run_matmul_plugin.sh --direct           # same demo, math inside QEMU
+```
+
+Both demos print one line per request, split into phases:
 
 ```text
-Full SoC runs in Verilator; QEMU provides stepping and the UART console.
-Logs: .../ibex-vp-cosim/build/soc-run.XXXXXX
-Hello World! 00000001   Input Value: 00000000
-Hello World! 00000002   Input Value: 00000000
+kick #4: 32x32 GEMM by daemon: 21.8 us = read A,B 1.38 + socket 16.17 + compute 3.54 + write C 0.75
+kick #4: 32x32 GEMM by plugin (direct): 4.5 us = read A,B 0.79 + compute 3.21 + write C 0.46
 ```
 
-Type a character such as `Z` to demonstrate UART input. The RTL UART receives it,
-the Ibex firmware handles its RX interrupt, and the firmware echoes it through
-the RTL UART and QEMU console. The hexadecimal counter is a firmware timer tick.
-GPIO input pins are tied to zero in the full-SoC testbench.
+| Phase | What it covers |
+| --- | --- |
+| read A,B | the plugin reading the mailbox, A, and B from guest memory |
+| socket | sending A and B to the daemon and receiving C, minus the daemon's compute time (daemon only) |
+| compute | C = A × B, timed where it runs: in the daemon, or in the plugin for direct |
+| write C | the plugin writing C, ERRCODE, and STATUS into guest memory |
 
-Exit with **Ctrl+A, then X**. Ctrl+C also stops the launcher and its child
-processes; QEMU's console can forward Ctrl+C to the guest, so use Ctrl+A, X for
-the normal demo exit. The launcher cleans up its socket and children and preserves
-`verilator.log` and `uart0.log` in the printed log directory.
+Single requests vary from run to run, and the first one is slower while caches
+warm up. The benchmark averages 2,000 requests per size.
 
-First output appeared in a few seconds on the prepared Mac; other hosts and
-firmware can take longer. This simulation runs in batches of 100,000 RTL cycles
-and is not synchronized to wall-clock time.
+### Results
 
-Use a different firmware ELF, a custom socket, or additional QEMU arguments:
+Apple M3 Pro, median of 7 runs, with the modes interleaved run by run.
+
+**Time per NPU request** (µs, average of 2,000 requests per size):
+
+| Matrix | Mode | Total | Read A,B | Socket | Compute | Write C |
+| --- | --- | --- | --- | --- | --- | --- |
+| 4×4 | Direct | 0.50 | 0.21 | – | 0.03 | 0.25 |
+| 4×4 | Daemon | 11.09 | 0.31 | 10.18 | 0.04 | 0.54 |
+| 8×8 | Direct | 0.58 | 0.22 | – | 0.11 | 0.25 |
+| 8×8 | Daemon | 11.10 | 0.32 | 10.11 | 0.15 | 0.52 |
+| 16×16 | Direct | 1.05 | 0.26 | – | 0.51 | 0.28 |
+| 16×16 | Daemon | 11.70 | 0.38 | 10.11 | 0.66 | 0.54 |
+| 32×32 | Direct | 3.75 | 0.37 | – | 3.04 | 0.35 |
+| 32×32 | Daemon | 25.85 | 0.67 | 19.86 | 4.32 | 1.00 |
+
+Per request, the daemon adds about 10.5 µs for small matrices and 22 µs at
+32×32. The socket round trip is 90–96% of that difference. The other phases are
+the same work in both modes but run slightly slower in daemon mode, probably
+because the thread has just woken up from waiting on the socket. The VP waits
+for each request, so nothing hides this cost. Per request, the direct
+implementation is faster.
+
+**Guest I/O and CPU workload with no NPU requests** (about 2 s of firmware
+computation and UART output):
+
+| Configuration | Time | vs no plugin |
+| --- | --- | --- |
+| No plugin | 2.130 s | 1.00× |
+| Direct implementation | 2.316 s | 1.09× |
+| NPU daemon | 2.321 s | 1.09× |
+
+Guest I/O and CPU performance are the same for the daemon and direct versions:
+the two are within 0.3% of each other. Both add about 9–11% over no plugin,
+because the plugin is called on every guest store to watch for the doorbell.
+
+The daemon is worth that cost when:
+
+- the NPU model is heavy or separate, for example a Verilator RTL NPU, another
+  language, or another machine;
+- several VPs share one NPU;
+- an NPU crash must not take down QEMU.
+
+The daemon can only beat the direct version on speed if requests are
+asynchronous, so the guest keeps running while the NPU computes on another
+core. That mode isn't implemented.
+
+## Programming the NPU from firmware
+
+The NPU is driven through a mailbox in guest RAM (`ibex-vp-cosim/tcg_plugin/matmul_accel.h`):
+
+| Address | Register | Meaning |
+| --- | --- | --- |
+| `0x0011C000` | `N` | matrix size, 1–32 |
+| `0x0011C004` | `A` | address of row-major `int32` A |
+| `0x0011C008` | `B` | address of B |
+| `0x0011C00C` | `C` | address for the result |
+| `0x0011C010` | `STATUS` | 0 idle, 1 done, 2 error |
+| `0x0011C014` | `KICK` | any store starts the request |
+| `0x0011C018` | `ERRCODE` | 1 bad N, 2 guest memory, 3 daemon unreachable or timed out, 4 rejected |
+
+```c
+#include "matmul_accel.h"
+#define REG(addr) (*(volatile uint32_t *)(addr))
+
+REG(MATMUL_ACCEL_N) = n;
+REG(MATMUL_ACCEL_A) = (uint32_t)a;
+REG(MATMUL_ACCEL_B) = (uint32_t)b;
+REG(MATMUL_ACCEL_C) = (uint32_t)c;
+REG(MATMUL_ACCEL_STATUS) = MATMUL_ACCEL_IDLE;
+REG(MATMUL_ACCEL_KICK) = 1;                       /* C is ready after this store */
+if (REG(MATMUL_ACCEL_STATUS) != MATMUL_ACCEL_DONE) { /* see ERRCODE */ }
+```
+
+Firmware must end below `0x0011C000`. Keep A, B, and C in page-aligned
+buffers (`__attribute__((aligned(4096)))`). If C shares a 4 KiB page with code,
+every write of the result makes QEMU discard and retranslate that code. That
+costs 100–500 µs per request, far more than the request itself. Full example:
+`ibex-vp-cosim/sw/matmul_accel/main.c`. The socket protocol between plugin and
+daemon is in [docs/MATMUL_DAEMON.md](docs/MATMUL_DAEMON.md).
+
+## Tests
 
 ```bash
-./ibex-vp-cosim/run_full_soc.sh /absolute/path/to/firmware.elf
-IBEXDEMO_COSIM_SOCKET=/tmp/my-ibex-soc.sock ./ibex-vp-cosim/run_full_soc.sh
-./ibex-vp-cosim/run_full_soc.sh "$ELF" -S
+python3 ibex-vp-cosim/scripts/test_matmul_daemon.py    # 24 tests, about 6 s
 ```
 
-With `-S`, press Ctrl+A, C to open the QEMU monitor and enter `cont`; switch back
-to the UART console with Ctrl+A, C. Pausing QEMU stops new stepping requests.
-QEMU GDB and register commands do not expose the RTL CPU; use RTL waveforms for
-debugging. This integration does not perform instruction lockstep comparison.
+The tests cover:
 
-## Rebuild the integration
+- **Daemon lifecycle:** detaching, pidfile, owner-only socket, cleanup,
+  refusing a second daemon, stale sockets.
+- **Protocol:** correctness for N = 1–64 and every error case; six concurrent VPs.
+- **VP end to end:** no daemon, no plugin, a daemon restart while running, and a
+  hung daemon.
+- **GDB:** a debugging session against the VP with the daemon attached.
+- **Direct baseline:** produces the same results as the daemon; the timing
+  breakdown and the quick benchmark work.
+- **Scripts:** the launcher (including `--direct`) and control script.
 
-```bash
-source ./env.sh
-./ibex-vp-cosim/build_full_soc.sh
-```
-
-The builder applies the provided patches when needed, copies the bridge sources
-into the external trees, rebuilds QEMU, and builds the full-SoC Verilator model
-with FuseSoC. It can be rerun after editing `ibex-vp-cosim/full_soc/` or the shared
-protocol header. Maintain those files in this repository; edits to their copies
-in the external trees will be replaced by the builder.
-
-The prepared native environment and firmware build adjustments are documented
-in [LOCAL_SETUP.md](LOCAL_SETUP.md). If you change firmware sources, rebuild them
-with the commands there before launching again.
-
-## Dependencies for a fresh checkout
-
-External source trees and tool installations are ignored by Git. You need:
-
-- Git, a C/C++ compiler, Make, CMake, Python 3, Ninja, Meson, pkg-config, and Rust.
-- Verilator and the lowRISC FuseSoC/Edalize Python dependencies.
-- GLib, Pixman, zlib, libelf, and LZ4 development libraries.
-- A bare-metal RISC-V GCC toolchain supporting RV32IMC, CSR, and instruction fence
-  instructions, available through the `riscv32-unknown-elf-*` tool names.
-
-Fetch the external sources only if the directories do not already exist:
-
-```bash
-git clone --recursive https://github.com/lowRISC/ibex-demo-system.git ibex-demo-system
-git clone --branch ot-10.2.0 https://github.com/lowRISC/qemu.git qemu
-source ./env.sh
-python3 -m pip install -r ibex-demo-system/python-requirements.txt
-```
-
-Use a Python environment appropriate for your host. On this Mac it is
-`local/env/`. Tested source revisions and tool versions are in `LOCAL_SETUP.md`.
-For current GCC and CMake, build the firmware with:
-
-```bash
-cmake -S "$ROOT/ibex-demo-system/sw/c" -B "$ROOT/ibex-demo-system/sw/c/build" \
-  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-  '-DCMAKE_C_FLAGS=-march=rv32imc_zicsr_zifencei -mabi=ilp32 -mcmodel=medany -Wall -fvisibility=hidden -ffreestanding' \
-  '-DCMAKE_ASM_FLAGS=-march=rv32imc_zicsr_zifencei -mabi=ilp32'
-cmake --build "$ROOT/ibex-demo-system/sw/c/build" --target demo
-./ibex-vp-cosim/build_full_soc.sh
-```
-
-The builder configures QEMU if needed, and never downloads dependencies itself.
-Fresh builds require libraries discoverable by your compiler and pkg-config.
-It adds the local macOS libelf/LZ4 paths when `local/env/lib/libelf.a` is present.
-
-## Other simulation modes
-
-### QEMU only
-
-This is the fast functional baseline; QEMU emulates both the CPU and peripherals:
-
-```bash
-source ./env.sh
-"$QEMU" -M ibexdemo -nographic -kernel "$ELF"
-```
-
-### Standalone full-SoC Verilator
-
-The same RTL simulator works without a QEMU connection when the socket option
-is omitted. UART goes to `uart0.log` and the testbench's pseudo-terminal:
-
-```bash
-source ./env.sh
-cd "$ROOT/ibex-demo-system/build/lowrisc_ibex_demo_system_0/sim-verilator"
-./Vtop_verilator --meminit=ram,"$ELF"
-```
-
-Read `uart0.log` from another terminal and stop with Ctrl+C.
-
-The GPIO-only server `Vcosim_gpio_server` remains for `scripts/test_gpio_client.py`.
-
-## Verification
-
-```bash
-source ./env.sh
-python3 ibex-vp-cosim/scripts/test_full_soc.py
-```
-
-The seven integration tests cover real RTL firmware output, UART interrupt echo,
-absence of a QEMU CPU, start-paused behavior, fragmented socket requests, bounded
-cycle execution, invalid requests/responses, disconnects, and launcher cleanup.
-They pass on the prepared Apple Silicon Mac. Build and test logs are in `deps/`.
+Each test uses its own socket, so the tests don't disturb a running daemon.
 
 ## Troubleshooting
 
-- **Missing tools or libraries:** source `env.sh` and review `LOCAL_SETUP.md`.
-- **Old simulator binaries:** run `ibex-vp-cosim/build_full_soc.sh`. QEMU's machine
-  list must contain `ibexdemo-soc-cosim`; the Verilator help must show
-  `--qemu-cosim-socket=PATH`.
-- **No UART output:** inspect the printed run directory's `verilator.log`; confirm
-  the same ELF works in standalone RTL mode and QEMU has not been paused with `-S`.
-- **Socket already exists:** stop its owning process before removing a stale
-  socket. By default each launch gets its own socket directory under `/tmp`.
-- **Protocol errors or response timeout:** rebuild both simulators together. The
-  QEMU client rejects incompatible responses and stops if no response arrives
-  within ten seconds; very slow hosts or waveform-heavy runs may hit that limit.
-- **Using `-kernel` with full-SoC QEMU:** pass the ELF to `run_cosim.sh` instead.
-  Verilator loads and executes it; this QEMU machine has no CPU or emulated RAM.
+- **`./ibex-vp-cosim/…: No such file or directory`:** you're not in the
+  repository folder. Run `cd ~/Ibex_verilator` (or wherever you cloned it) and
+  `source ./env.sh`, then try again.
+- **`riscv32-unknown-elf-gcc: command not found`:** run `source ./env.sh`, and
+  check that `toolchain/bin/` exists (step 3).
+- **`Invalid or unknown z ISA extension: 'zifencei'`:** handled automatically.
+  To force a naming, use `make -C ibex-vp-cosim RV_MARCH=rv32imc`.
+- **QEMU `configure` fails:** a step 1 package is missing; the error names it.
+- **QEMU rejects `-plugin`, or the plugin won't load:** QEMU lacks plugin
+  support. Run `./ibex-vp-cosim/build_matmul_plugin.sh`; it reconfigures QEMU
+  once.
+- **`cannot connect to matmul daemon at …` and QEMU exits:** start the daemon
+  (`matmul_daemon.sh start`), and use the same `IBEX_MATMUL_SOCKET` everywhere.
+- **`a daemon is already listening on …`:** reuse it, or run
+  `matmul_daemon.sh stop` first.
+- **`… exists and is not a socket` / `socket path too long`:** pick another
+  `IBEX_MATMUL_SOCKET`, short and under `/tmp`.
+- **Firmware prints `no response (is the plugin loaded?)`:** QEMU ran without
+  `-plugin …matmul_plugin.so`.
+- **Firmware prints `accelerator error 3`:** the daemon went away or didn't answer
+  within `timeout_ms`. Check `matmul_daemon.sh log`.
+- **GDB can't connect:** the VP must be started with `--gdb` (or `-s -S`), and
+  the port must match (`GDB_PORT`).
 
-## Integration source map
+## Source map
 
-- `ibex-vp-cosim/full_soc/soc_cosim.h`: RTL stepping server and UART byte queues.
-- `ibex-vp-cosim/full_soc/ibexdemo_soc_cosim.c`: QEMU machine and asynchronous client.
-- `ibex-vp-cosim/include/cosim_soc_protocol.h`: versioned, little-endian socket protocol.
-- `patches/0003-full-soc-verilator-hooks.patch`: simulator registration and UART DPI hooks.
-- `ibex-vp-cosim/build_full_soc.sh`: patch application and simulator builds.
-- `ibex-vp-cosim/run_cosim.sh`: default periph cosim launch (wraps `run_periph_cosim.sh`).
-- `ibex-vp-cosim/tcg_plugin/`: TCG matmul plugin and doorbell header.
+| File | Role |
+| --- | --- |
+| `ibex-vp-cosim/matmul_daemon/matmul_daemon.c` | NPU daemon |
+| `ibex-vp-cosim/tcg_plugin/matmul_plugin.c` | QEMU TCG plugin connecting the VP to the NPU (and the direct baseline with `-DMATMUL_PLUGIN_DIRECT`) |
+| `ibex-vp-cosim/include/matmul_daemon_protocol.h` | plugin-to-daemon socket protocol |
+| `ibex-vp-cosim/include/matmul_gemm.h` | GEMM kernel |
+| `ibex-vp-cosim/tcg_plugin/matmul_accel.h` | firmware-facing mailbox |
+| `ibex-vp-cosim/sw/matmul_accel/main.c` | test firmware |
+| `ibex-vp-cosim/sw/npu_bench/main.c` | benchmark firmware |
+| `ibex-vp-cosim/matmul_daemon.sh` | daemon start, stop, status, log, foreground |
+| `ibex-vp-cosim/run_matmul_plugin.sh` | one-command launcher (`--gdb` for debugging) |
+| `ibex-vp-cosim/build_matmul_plugin.sh`, `ibex-vp-cosim/Makefile` | builds |
+| `ibex-vp-cosim/scripts/test_matmul_daemon.py`, `scripts/bench_npu.py` | tests and benchmark |
 
-Protocol details: [ibex-vp-cosim/README.md](ibex-vp-cosim/README.md).
-Presentation commands: [CHEATSHEET.md](CHEATSHEET.md).
+More documentation:
 
-For the separately proposed QEMU-CPU instruction/cycle synchronization mode, see
-[the strict lock-step design](docs/LOCKSTEP_DESIGN.md). It specifies per-edge
-handshakes, MMIO completion stalls, clock accounting, and required QEMU core
-changes. It is a design, not an implemented mode or a claim that instruction
-counting reproduces physical Ibex CPU timing.
+- [docs/MATMUL_DAEMON.md](docs/MATMUL_DAEMON.md): protocol and failure handling.
+- [docs/MATMUL_DEEP_DIVE.md](docs/MATMUL_DEEP_DIVE.md): presenter notes for a code walkthrough.
+- [docs/Ibex_NPU_VP_Overview.pptx](docs/Ibex_NPU_VP_Overview.pptx): 24-slide overview
+  deck with speaker notes; opens in PowerPoint, or upload it to Google Slides.
+- [docs/OTHER_MODES.md](docs/OTHER_MODES.md): the repository's other simulation
+  modes (full-SoC RTL in Verilator and others), which this NPU setup doesn't need.
