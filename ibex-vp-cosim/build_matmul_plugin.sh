@@ -10,7 +10,11 @@ QEMU_SRC="$ROOT/qemu"
 QEMU_BUILD="$QEMU_SRC/build"
 
 qemu_configured_with_plugins() {
-  grep -q '^#define CONFIG_PLUGIN' "$QEMU_BUILD/config-host.h" 2>/dev/null
+  # config-host.h is written before meson finishes, so a failed configure can
+  # define CONFIG_PLUGIN without producing build.ninja.
+  [[ -f "$QEMU_BUILD/build.ninja" ]] &&
+    [[ -x "$QEMU_BUILD/qemu-system-riscv32" ]] &&
+    grep -q '^#define CONFIG_PLUGIN' "$QEMU_BUILD/config-host.h" 2>/dev/null
 }
 
 if ! qemu_configured_with_plugins; then

@@ -69,7 +69,11 @@ endif
 rv_try = $(shell tmp=$$(mktemp) && \
 	printf 'void _start(void){}\n' | $(RV_CC) $(1) -mabi=ilp32 -nostdlib -x c -o $$tmp - \
 	>/dev/null 2>&1; rc=$$?; rm -f $$tmp; [ $$rc = 0 ] && echo ok)
-RV_MARCH ?= $(if $(call rv_try,-march=rv32imc_zicsr_zifencei),rv32imc_zicsr_zifencei,rv32imc)
+# gas can reject zifencei even when the C compiler accepts that -march.
+rv_as_ok = $(shell printf 'nop\n' | $(RV_CC) $(1) -mabi=ilp32 -c -x assembler -o /dev/null - \
+	>/dev/null 2>&1 && echo ok)
+RV_MARCH ?= $(if $(and $(call rv_try,-march=rv32imc_zicsr_zifencei),\
+	$(call rv_as_ok,-march=rv32imc_zicsr_zifencei)),rv32imc_zicsr_zifencei,rv32imc)
 RV_LDNOWARN = $(if $(call rv_try,-march=$(RV_MARCH) -Wl$(comma)--no-warn-rwx-segments),\
 	-Wl$(comma)--no-warn-rwx-segments)
 comma := ,
